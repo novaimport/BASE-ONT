@@ -8,8 +8,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import gspread
 from google.oauth2.service_account import Credentials
-import bcrypt, pytz, secrets, re
-from datetime import datetime, timedelta
+import bcrypt, pytz, secrets, re, math
+from datetime import datetime, date, timedelta
+import calendar
 
 # ─────────────────────────────────────────────────────────────────────
 # 1. CONFIGURACIÓN GLOBAL
@@ -182,7 +183,7 @@ def _validate_pw(p: str):
     return None
 
 # ─────────────────────────────────────────────────────────────────────
-# 6. INIT SYSTEM
+# 6. INIT SYSTEM (se ejecuta una sola vez al arrancar)
 # ─────────────────────────────────────────────────────────────────────
 def init_system():
     ss   = _ss()
@@ -223,8 +224,7 @@ def init_system():
 try:
     init_system()
 except Exception as _ei:
-    st.error(f"⚠️ Error inicializando el sistema (Revisa permisos del archivo): {_ei}")
-    st.stop()
+    st.error(f"⚠️ Error inicializando el sistema: {_ei}")
 
 # ─────────────────────────────────────────────────────────────────────
 # 7. CATÁLOGOS (cacheados)
@@ -280,7 +280,7 @@ def _get_users_raw() -> list:
         return []
 
 def _find_user(username: str):
-    """Returns (row_idx_1based, user_dict, ws) or (None, None, ws)."""
+    """Returns (row_idx_1based, user_dict) or (None, None)."""
     try:
         ws      = _ws(SH_USUARIOS)
         records = ws.get_all_records()
@@ -307,13 +307,13 @@ def _update_user_fields(username: str, fields: dict) -> bool:
     except Exception:
         return False
 
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=15, show_spinner=False)
 def _get_db_token(username: str, v=0) -> str:
     _, user, _ = _find_user(username)
     return str(user.get('session_token', '')) if user else ''
 
 # ─────────────────────────────────────────────────────────────────────
-# 9. LOGIN & SESSION CHECK
+# 9. LOGIN
 # ─────────────────────────────────────────────────────────────────────
 def do_login():
     u = st.session_state.log_u
@@ -351,7 +351,7 @@ def do_login():
         })
         _get_db_token.clear()
         st.session_state.update({
-            'logged_in': True, 'role': str(user.get('role', 'auditor')),
+            'logged_in': True, 'role': str(user.get('role', 'viewer')),
             'username': u, 'log_err': '', 'session_token': token,
         })
     else:
@@ -395,11 +395,9 @@ _local_tok = st.session_state.get('session_token', '')
 if _local_tok:
     _db_tok = _get_db_token(st.session_state.username, v=_dv())
     if _db_tok and _db_tok != _local_tok:
-        # Se inició sesión en otra parte
         for _k, _v in _DEFAULTS.items():
             st.session_state[_k] = _v
-        st.session_state.flash_msg = "⚠️ Tu sesión fue cerrada porque este usuario inició sesión en otro dispositivo."
-        st.session_state.flash_type = "error"
+        _flash("⚠️ Tu sesión fue cerrada porque el mismo usuario inició sesión desde otro dispositivo.", 'error')
         st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────
@@ -418,6 +416,7 @@ def load_month_data(y: int, m: int, v=0) -> pd.DataFrame:
         if not data:
             return pd.DataFrame(columns=DATA_COLS)
         df = pd.DataFrame(data)
+        # Exclude soft-deleted rows
         if 'Eliminado' in df.columns:
             df = df[df['Eliminado'].astype(str).str.upper() != 'TRUE'].copy()
         return df
@@ -443,7 +442,7 @@ def append_ont_record(record: dict) -> bool:
         fecha_str = record.get('Fecha', '')
         dt  = datetime.strptime(fecha_str, '%Y-%m-%d') if isinstance(fecha_str, str) else fecha_str
         ws  = _get_month_ws(dt.year, dt.month)
-        n   = len(ws.get_all_values())
+        n   = len(ws.get_all_values())  # includes header → n-1 existing rows → ID = n
         row = [
             n,                                        # ID
             record.get('Fecha', ''),
@@ -509,6 +508,7 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
     neg = sum(v for k, v in pm.items() if tipo_map.get(k, 'neutral') == 'negative')
     neu = total - pos - neg
 
+    # Per-zone by tipo
     pzt = pd.DataFrame()
     if 'Zona' in df.columns and 'Motivo' in df.columns:
         df2        = df.copy()
@@ -526,6 +526,11 @@ def _delta_str(cur, prv) -> str:
     return ('+' if d >= 0 else '') + str(d)
 
 def _delta_color(cur, prv, tipo: str) -> str:
+    """
+    positive motives: more = better → normal (verde si sube)
+    negative motives: less = better → inverse (verde si baja)
+    neutral: normal
+    """
     if tipo == 'negative':
         return 'inverse'
     return 'normal'
@@ -565,11 +570,9 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────
 role = st.session_state.role
 
-if role == 'admin':
-    _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial","⚙️ Configuración"]
-else:
-    # Auditor tabs (viewer no longer exists)
-    _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial"]
+if   role == 'admin':   _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial","⚙️ Configuración"]
+elif role == 'auditor': _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial"]
+else:                   _tabs = ["📊 Dashboard"]
 
 tabs  = st.tabs(_tabs)
 t_idx = 0
@@ -582,6 +585,7 @@ with tabs[t_idx]:
 
     tipo_map = get_tipo_map(v=_dv())
 
+    # Load current + previous month
     df_cur  = load_month_data(anio, m_idx, v=_dv())
     pm_anio = anio - 1 if m_idx == 1 else anio
     pm_mes  = 12 if m_idx == 1 else m_idx - 1
@@ -590,6 +594,7 @@ with tabs[t_idx]:
     kpi  = calc_metrics(df_cur,  tipo_map)
     kpip = calc_metrics(df_prev, tipo_map)
 
+    # ── KPIs globales ──
     st.markdown("### 📈 Resumen del Mes")
     st.caption(f"*Variación vs {MESES[pm_mes - 1]} {pm_anio}*")
 
@@ -608,6 +613,7 @@ with tabs[t_idx]:
     if df_cur.empty:
         st.info("ℹ️ No hay registros para este mes. Comienza registrando un movimiento.")
     else:
+        # ── Por motivo ──
         st.divider()
         st.markdown("### 📋 Desglose por Motivo")
         col_mot, col_pie = st.columns(2)
@@ -637,6 +643,7 @@ with tabs[t_idx]:
                                   showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
 
+        # ── Por zona ──
         st.divider()
         st.markdown("### 🗺️ Análisis por Zona")
         col_z1, col_z2 = st.columns(2)
@@ -667,6 +674,7 @@ with tabs[t_idx]:
                                      margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30)
                 st.plotly_chart(fig_zt, use_container_width=True)
 
+        # ── Técnico y Asesor ──
         st.divider()
         col_tec, col_as = st.columns(2)
 
@@ -694,156 +702,286 @@ with tabs[t_idx]:
                                      margin=dict(l=0, r=0, t=40, b=0))
                 st.plotly_chart(fig_as, use_container_width=True)
 
+        # ── Balance Instalaciones vs Desconexiones ──
+        st.divider()
+        st.markdown("### ⚖️ Balance: Instalaciones & Reconexiones vs Desconexiones")
+        b_col1, b_col2, b_col3 = st.columns(3)
+
+        inst_rc = kpi['por_motivo'].get('Instalacion Nueva', 0) + kpi['por_motivo'].get('Reconexion', 0)
+        descon  = kpi['por_motivo'].get('Desconexion', 0)
+        neto    = inst_rc - descon
+
+        b_col1.metric("📥 Inst. + Reconexiones", inst_rc)
+        b_col2.metric("📤 Desconexiones",         descon)
+        color_neto = "normal" if neto >= 0 else "inverse"
+        b_col3.metric("⚖️ Neto de Clientes",      neto,
+                      f"{'▲' if neto >= 0 else '▼'} {abs(neto)}",
+                      delta_color=color_neto)
+
+        # ── Comparación entre meses ──
+        st.divider()
+        st.markdown("### 📅 Comparación entre Meses")
+
+        with st.expander("🔍 Configurar comparación", expanded=True):
+            cc1, cc2 = st.columns([3, 1])
+            meses_sel = cc1.multiselect(
+                "Selecciona los meses a comparar",
+                options=list(MESES),
+                default=[MESES[pm_mes - 1], mes_sel],
+                max_selections=6,
+            )
+            anio_comp = cc2.selectbox("Año", [anio, anio - 1], key="anio_comp")
+
+        if len(meses_sel) >= 2:
+            comp_rows = []
+            for mc in meses_sel:
+                mi = MESES.index(mc) + 1
+                dfc = load_month_data(anio_comp, mi, v=_dv())
+                km  = calc_metrics(dfc, tipo_map)
+                comp_rows.append({
+                    'Mes': mc, 'Total': km['total'],
+                    'Positivos': km['pos'], 'Negativos': km['neg'],
+                    'Neutrales': km['neu'], 'Balance': km['balance'],
+                })
+            df_comp = pd.DataFrame(comp_rows)
+
+            fig_comp = px.bar(
+                df_comp.melt(id_vars='Mes',
+                             value_vars=['Positivos', 'Negativos', 'Neutrales']),
+                x='Mes', y='value', color='variable', barmode='group',
+                text_auto=True,
+                color_discrete_map={
+                    'Positivos': COLOR_TEAL,
+                    'Negativos': COLOR_DANGER,
+                    'Neutrales': COLOR_WARN,
+                },
+                category_orders={'Mes': meses_sel},
+                title=f"Comparativo Mensual — {anio_comp}",
+            )
+            fig_comp.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=400,
+                                   margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig_comp, use_container_width=True)
+
+            # Delta table
+            st.markdown("**📉📈 Variación entre meses consecutivos seleccionados:**")
+            for i in range(1, len(comp_rows)):
+                cur_c = comp_rows[i]
+                prv_c = comp_rows[i - 1]
+
+                def _cell(label, cur_v, prv_v, tipo):
+                    d   = cur_v - prv_v
+                    sig = '+' if d >= 0 else ''
+                    if   tipo == 'positive': clr = COLOR_TEAL   if d >= 0 else COLOR_DANGER
+                    elif tipo == 'negative': clr = COLOR_TEAL   if d <= 0 else COLOR_DANGER
+                    else:                    clr = COLOR_WARN
+                    return (f"<div style='text-align:center'><b style='font-size:12px;"
+                            f"color:#a5a8b5'>{label}</b><br>"
+                            f"<span style='color:{clr};font-size:22px;font-weight:800'>"
+                            f"{cur_v}</span><br>"
+                            f"<span style='color:{clr};font-size:13px'>({sig}{d})</span></div>")
+
+                rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+                rc1.markdown(
+                    f"<div style='padding-top:14px;font-weight:700;"
+                    f"color:#a5a8b5;font-size:13px'>"
+                    f"📆 {cur_c['Mes']}<br><span style='color:#555'>vs {prv_c['Mes']}</span></div>",
+                    unsafe_allow_html=True,
+                )
+                rc2.markdown(_cell("✅ Positivos",  cur_c['Positivos'], prv_c['Positivos'], 'positive'), unsafe_allow_html=True)
+                rc3.markdown(_cell("⚠️ Negativos",  cur_c['Negativos'], prv_c['Negativos'], 'negative'), unsafe_allow_html=True)
+                rc4.markdown(_cell("🔄 Neutrales",  cur_c['Neutrales'], prv_c['Neutrales'], 'neutral'),  unsafe_allow_html=True)
+                rc5.markdown(_cell("⚖️ Balance",    cur_c['Balance'],   prv_c['Balance'],   'positive'), unsafe_allow_html=True)
+                st.divider()
+
+        # ── Resumen Anual ──
+        st.divider()
+        st.markdown(f"### 📆 Tendencia Anual — {anio}")
+        with st.spinner("Cargando datos anuales…"):
+            df_year = load_year_data(anio, v=_dv())
+
+        if not df_year.empty:
+            annual_rows = []
+            for mi in range(1, 13):
+                df_mi = df_year[df_year['_mes'] == mi] if '_mes' in df_year.columns else pd.DataFrame()
+                km    = calc_metrics(df_mi, tipo_map)
+                annual_rows.append({
+                    'Mes':       MESES[mi - 1],
+                    'Total':     km['total'],
+                    'Positivos': km['pos'],
+                    'Negativos': km['neg'],
+                    'Balance':   km['balance'],
+                })
+            df_annual = pd.DataFrame(annual_rows)
+            fig_ann   = px.line(
+                df_annual, x='Mes',
+                y=['Total', 'Positivos', 'Negativos', 'Balance'],
+                markers=True,
+                color_discrete_map={
+                    'Total':     COLOR_PRIMARY,
+                    'Positivos': COLOR_TEAL,
+                    'Negativos': COLOR_DANGER,
+                    'Balance':   '#83c9ff',
+                },
+                title=f"Tendencia de Operaciones ONT — {anio}",
+                category_orders={'Mes': list(MESES)},
+            )
+            fig_ann.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=380,
+                                  margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig_ann, use_container_width=True)
+
 t_idx += 1
 
 # ═════════════════════════════════════════════════════════════════════
-# TAB 1 — REGISTRAR (Admin & Auditor)
+# TAB 1 — REGISTRAR
 # ═════════════════════════════════════════════════════════════════════
-with tabs[t_idx]:
-    st.title("📝 Registrar Movimiento de ONT")
-    fk = st.session_state.form_reset
+if role in ('admin', 'auditor'):
+    with tabs[t_idx]:
+        st.title("📝 Registrar Movimiento de ONT")
+        fk = st.session_state.form_reset
 
-    zonas_l = get_zonas(v=_dv())
-    tecs_l  = get_tecnicos(v=_dv())
-    mots_l  = get_motivos_list(v=_dv())
-    today   = datetime.now(SV_TZ).date()
+        zonas_l = get_zonas(v=_dv())
+        tecs_l  = get_tecnicos(v=_dv())
+        mots_l  = get_motivos_list(v=_dv())
+        today   = datetime.now(SV_TZ).date()
 
-    with st.container(border=True):
-        st.info(
-            f"👤 **Asesor registrado automáticamente:** `{st.session_state.username}`  "
-            f"|  📅 **Hoy:** `{today.strftime('%d/%m/%Y')}`"
+        with st.container(border=True):
+            st.info(
+                f"👤 **Asesor registrado automáticamente:** `{st.session_state.username}`  "
+                f"|  📅 **Hoy:** `{today.strftime('%d/%m/%Y')}`"
+            )
+
+            cc1, cc2 = st.columns(2)
+            tec    = cc1.selectbox("🔧 Técnico de Campo *", tecs_l, key=f"tec_{fk}")
+            zona   = cc2.selectbox("🗺️ Zona *",            zonas_l, key=f"zon_{fk}")
+            motivo = st.selectbox("📋 Motivo / Tipo de Operación *", mots_l, key=f"mot_{fk}")
+
+            tipo_sel = tipo_map.get(motivo, 'neutral')
+            if   tipo_sel == 'positive': st.success(f"✅ {TIPO_LABEL['positive']}")
+            elif tipo_sel == 'negative': st.warning(f"⚠️ {TIPO_LABEL['negative']}")
+            else:                        st.info(f"🔄 {TIPO_LABEL['neutral']}")
+
+            st.divider()
+            sc1, sc2 = st.columns(2)
+            sn_elim = sc1.text_input("🔴 SN ONT Retirada / Eliminada (dejar en blanco si no aplica)", key=f"sne_{fk}")
+            sn_agr  = sc2.text_input("🟢 SN ONT Instalada / Agregada (dejar en blanco si no aplica)", key=f"sna_{fk}")
+
+            st.divider()
+            dc1, dc2, dc3 = st.columns(3)
+            cod_cl   = dc1.text_input("🆔 Código de Cliente *",              key=f"cod_{fk}")
+            nom_cl   = dc2.text_input("👤 Nombre Completo del Cliente *",    key=f"nom_{fk}")
+            ord_trab = dc3.text_input("📄 N° de Orden de Trabajo *",         key=f"ot_{fk}")
+
+            desc       = st.text_area("📝 Descripción Adicional (Opcional)", key=f"desc_{fk}", height=80)
+            fecha_reg  = st.date_input("📅 Fecha del Movimiento", value=today, key=f"fecha_{fk}")
+
+            st.write("")
+            if st.button("💾 Guardar Registro", type="primary", use_container_width=True):
+                if not all([tec, zona, motivo, cod_cl, nom_cl, ord_trab]):
+                    _flash("❌ Completa todos los campos obligatorios (*) antes de guardar.", 'error')
+                    st.rerun()
+                else:
+                    record = {
+                        'Fecha':          fecha_reg.strftime('%Y-%m-%d'),
+                        'Asesor':         st.session_state.username,
+                        'Tecnico':        tec,
+                        'Zona':           zona,
+                        'SN_Eliminada':   sn_elim.strip(),
+                        'SN_Agregada':    sn_agr.strip(),
+                        'Motivo':         motivo,
+                        'Cod_Cliente':    cod_cl.strip(),
+                        'Nombre_Cliente': nom_cl.strip(),
+                        'Orden_Trabajo':  ord_trab.strip(),
+                        'Descripcion':    desc.strip(),
+                    }
+                    with st.spinner("Guardando en Google Sheets…"):
+                        ok = append_ont_record(record)
+                    if ok:
+                        _inv()
+                        st.session_state.form_reset += 1
+                        _flash("✅ Registro guardado exitosamente en Google Sheets.")
+                        st.rerun()
+
+    t_idx += 1
+
+# ═════════════════════════════════════════════════════════════════════
+# TAB 2 — HISTORIAL
+# ═════════════════════════════════════════════════════════════════════
+if role in ('admin', 'auditor'):
+    with tabs[t_idx]:
+        st.markdown("### 🗂️ Historial de Movimientos")
+
+        hc1, hc2 = st.columns([2, 1])
+        with hc1:
+            ver_todo = st.toggle("📆 Ver todos los meses del año seleccionado")
+        with hc2:
+            bq = st.text_input("🔎 Buscar:", placeholder="Técnico, SN, nombre cliente…")
+
+        if ver_todo:
+            with st.spinner("Cargando historial anual…"):
+                df_hist = load_year_data(anio, v=_dv())
+            st.caption(f"Mostrando todos los registros de {anio}")
+        else:
+            df_hist = load_month_data(anio, m_idx, v=_dv())
+            st.caption(f"Mostrando registros de {mes_sel} {anio}")
+
+        if bq and not df_hist.empty:
+            df_hist = df_hist[
+                df_hist.astype(str)
+                .apply(lambda x: x.str.contains(bq, case=False, na=False))
+                .any(axis=1)
+            ]
+
+        # Hide internal columns
+        _hide = ['Eliminado', '_mes', '_mes_nm']
+        df_show = df_hist.drop(columns=[c for c in _hide if c in df_hist.columns], errors='ignore')
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        st.caption(f"📊 Total registros mostrados: **{len(df_show)}**")
+
+        # ── Eliminar (solo admin) ──
+        if role == 'admin' and not df_hist.empty and 'ID' in df_hist.columns:
+            st.divider()
+            with st.expander("🗑️ Eliminar un Registro", expanded=False):
+                ids_avail = df_hist['ID'].tolist()
+
+                def _lbl_id(x):
+                    r = df_hist[df_hist['ID'] == x]
+                    if r.empty:
+                        return f"ID {x}"
+                    return (f"ID {x} | {r['Nombre_Cliente'].values[0]} | "
+                            f"{r['Motivo'].values[0]} | {r['Zona'].values[0]}")
+
+                sel_del = st.selectbox("Selecciona el registro", ids_avail,
+                                       format_func=_lbl_id)
+                if sel_del is not None:
+                    r_del = df_hist[df_hist['ID'] == sel_del].iloc[0]
+                    fecha_del_str = str(r_del.get('Fecha', f"{anio}-{m_idx:02d}-01"))
+                    try:
+                        dt_del = datetime.strptime(fecha_del_str[:7], '%Y-%m')
+                        y_del, m_del = dt_del.year, dt_del.month
+                    except Exception:
+                        y_del, m_del = anio, m_idx
+
+                    if st.button("🗑️ Confirmar Eliminación", type="secondary", use_container_width=True):
+                        if soft_delete_record(y_del, m_del, sel_del):
+                            _inv()
+                            _flash("🗑️ Registro eliminado del historial.")
+                            st.rerun()
+                        else:
+                            _flash("❌ No se pudo eliminar el registro.", 'error')
+                            st.rerun()
+
+        st.divider()
+        st.download_button(
+            "📥 Descargar CSV",
+            df_show.to_csv(index=False).encode('utf-8'),
+            f"ONT_{mes_sel}_{anio}.csv", "text/csv",
+            use_container_width=True,
         )
 
-        cc1, cc2 = st.columns(2)
-        tec    = cc1.selectbox("🔧 Técnico de Campo *", tecs_l, key=f"tec_{fk}")
-        zona   = cc2.selectbox("🗺️ Zona *",            zonas_l, key=f"zon_{fk}")
-        motivo = st.selectbox("📋 Motivo / Tipo de Operación *", mots_l, key=f"mot_{fk}")
-
-        tipo_sel = tipo_map.get(motivo, 'neutral')
-        if   tipo_sel == 'positive': st.success(f"✅ {TIPO_LABEL['positive']}")
-        elif tipo_sel == 'negative': st.warning(f"⚠️ {TIPO_LABEL['negative']}")
-        else:                        st.info(f"🔄 {TIPO_LABEL['neutral']}")
-
-        st.divider()
-        sc1, sc2 = st.columns(2)
-        sn_elim = sc1.text_input("🔴 SN ONT Retirada / Eliminada (Opcional)", key=f"sne_{fk}")
-        sn_agr  = sc2.text_input("🟢 SN ONT Instalada / Agregada (Opcional)", key=f"sna_{fk}")
-
-        st.divider()
-        dc1, dc2, dc3 = st.columns(3)
-        cod_cl   = dc1.text_input("🆔 Código de Cliente *",              key=f"cod_{fk}")
-        nom_cl   = dc2.text_input("👤 Nombre Completo del Cliente *",    key=f"nom_{fk}")
-        ord_trab = dc3.text_input("📄 N° de Orden de Trabajo *",         key=f"ot_{fk}")
-
-        desc       = st.text_area("📝 Descripción Adicional (Opcional)", key=f"desc_{fk}", height=80)
-        fecha_reg  = st.date_input("📅 Fecha del Movimiento", value=today, key=f"fecha_{fk}")
-
-        st.write("")
-        if st.button("💾 Guardar Registro", type="primary", use_container_width=True):
-            if not all([tec, zona, motivo, cod_cl, nom_cl, ord_trab]):
-                _flash("❌ Completa todos los campos obligatorios (*) antes de guardar.", 'error')
-                st.rerun()
-            else:
-                record = {
-                    'Fecha':          fecha_reg.strftime('%Y-%m-%d'),
-                    'Asesor':         st.session_state.username, # Se toma directamente del inicio de sesión
-                    'Tecnico':        tec,
-                    'Zona':           zona,
-                    'SN_Eliminada':   sn_elim.strip(),
-                    'SN_Agregada':    sn_agr.strip(),
-                    'Motivo':         motivo,
-                    'Cod_Cliente':    cod_cl.strip(),
-                    'Nombre_Cliente': nom_cl.strip(),
-                    'Orden_Trabajo':  ord_trab.strip(),
-                    'Descripcion':    desc.strip(),
-                }
-                with st.spinner("Guardando en Google Sheets…"):
-                    ok = append_ont_record(record)
-                if ok:
-                    _inv()
-                    st.session_state.form_reset += 1
-                    _flash("✅ Registro guardado exitosamente en Google Sheets.")
-                    st.rerun()
-
-t_idx += 1
+    t_idx += 1
 
 # ═════════════════════════════════════════════════════════════════════
-# TAB 2 — HISTORIAL (Admin & Auditor)
-# ═════════════════════════════════════════════════════════════════════
-with tabs[t_idx]:
-    st.markdown("### 🗂️ Historial de Movimientos")
-
-    hc1, hc2 = st.columns([2, 1])
-    with hc1:
-        ver_todo = st.toggle("📆 Ver todos los meses del año seleccionado")
-    with hc2:
-        bq = st.text_input("🔎 Buscar:", placeholder="Técnico, SN, nombre cliente…")
-
-    if ver_todo:
-        with st.spinner("Cargando historial anual…"):
-            df_hist = load_year_data(anio, v=_dv())
-        st.caption(f"Mostrando todos los registros de {anio}")
-    else:
-        df_hist = load_month_data(anio, m_idx, v=_dv())
-        st.caption(f"Mostrando registros de {mes_sel} {anio}")
-
-    if bq and not df_hist.empty:
-        df_hist = df_hist[
-            df_hist.astype(str)
-            .apply(lambda x: x.str.contains(bq, case=False, na=False))
-            .any(axis=1)
-        ]
-
-    _hide = ['Eliminado', '_mes', '_mes_nm']
-    df_show = df_hist.drop(columns=[c for c in _hide if c in df_hist.columns], errors='ignore')
-    st.dataframe(df_show, use_container_width=True, hide_index=True)
-    st.caption(f"📊 Total registros mostrados: **{len(df_show)}**")
-
-    # Eliminación habilitada solo para administradores
-    if role == 'admin' and not df_hist.empty and 'ID' in df_hist.columns:
-        st.divider()
-        with st.expander("🗑️ Eliminar un Registro", expanded=False):
-            ids_avail = df_hist['ID'].tolist()
-
-            def _lbl_id(x):
-                r = df_hist[df_hist['ID'] == x]
-                if r.empty:
-                    return f"ID {x}"
-                return (f"ID {x} | {r['Nombre_Cliente'].values[0]} | "
-                        f"{r['Motivo'].values[0]} | {r['Zona'].values[0]}")
-
-            sel_del = st.selectbox("Selecciona el registro a eliminar", ids_avail,
-                                   format_func=_lbl_id)
-            if sel_del is not None:
-                r_del = df_hist[df_hist['ID'] == sel_del].iloc[0]
-                fecha_del_str = str(r_del.get('Fecha', f"{anio}-{m_idx:02d}-01"))
-                try:
-                    dt_del = datetime.strptime(fecha_del_str[:7], '%Y-%m')
-                    y_del, m_del = dt_del.year, dt_del.month
-                except Exception:
-                    y_del, m_del = anio, m_idx
-
-                if st.button("🗑️ Confirmar Eliminación", type="secondary", use_container_width=True):
-                    if soft_delete_record(y_del, m_del, sel_del):
-                        _inv()
-                        _flash("🗑️ Registro eliminado del historial.")
-                        st.rerun()
-                    else:
-                        _flash("❌ No se pudo eliminar el registro.", 'error')
-                        st.rerun()
-
-    st.divider()
-    st.download_button(
-        "📥 Descargar CSV",
-        df_show.to_csv(index=False).encode('utf-8'),
-        f"ONT_{mes_sel}_{anio}.csv", "text/csv",
-        use_container_width=True,
-    )
-
-t_idx += 1
-
-# ═════════════════════════════════════════════════════════════════════
-# TAB 3 — CONFIGURACIÓN (SOLO ADMIN)
+# TAB 3 — CONFIGURACIÓN (admin only)
 # ═════════════════════════════════════════════════════════════════════
 if role == 'admin' and len(tabs) > t_idx:
     with tabs[t_idx]:
@@ -967,10 +1105,10 @@ if role == 'admin' and len(tabs) > t_idx:
                     st.markdown("**Crear Nuevo Usuario**")
                     nu_u = st.text_input("Nombre de usuario")
                     nu_p = st.text_input("Contraseña", type="password")
-                    # El rol Viewer fue eliminado a petición.
-                    nu_r = st.selectbox("Rol", ['auditor', 'admin'],
+                    nu_r = st.selectbox("Rol", ['viewer', 'auditor', 'admin'],
                                         format_func=lambda x: {
-                                            'auditor': '📝 Auditor',
+                                            'viewer':  '👁️ Solo Vista',
+                                            'auditor': '📝 Auditor (Puede registrar)',
                                             'admin':   '⚙️ Administrador',
                                         }[x])
                     if st.form_submit_button("✅ Crear Usuario") and nu_u and nu_p:
@@ -1013,6 +1151,7 @@ if role == 'admin' and len(tabs) > t_idx:
                 if users_raw:
                     df_u_all = pd.DataFrame(users_raw)
 
+                    # Super admin — read-only
                     df_sa = df_u_all[df_u_all['username'] == SUPERADMIN]
                     df_ot = df_u_all[df_u_all['username'] != SUPERADMIN].reset_index(drop=True)
 
@@ -1029,7 +1168,7 @@ if role == 'admin' and len(tabs) > t_idx:
                         for _, ur in df_ot.iterrows():
                             uc1, uc2, uc3, uc4, uc5 = st.columns([2, 1, 1, 1, 1])
                             uc1.markdown(f"**{ur['username']}**")
-                            uc2.caption(ur.get('role', 'auditor'))
+                            uc2.caption(ur.get('role', 'viewer'))
                             is_banned_u = str(ur.get('is_banned', 'FALSE')).upper() == 'TRUE'
                             fa_u        = int(ur.get('failed_attempts', 0) or 0)
                             uc3.caption(f"{'🚫 Baneado' if is_banned_u else '✅ Activo'}")
