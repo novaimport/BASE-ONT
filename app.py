@@ -360,7 +360,7 @@ def load_month_data(y: int, m: int) -> pd.DataFrame:
         ORDER BY timestamp DESC
     """
     try:
-        df = conn.query(sql, ttl=0)
+        df = conn.query(sql, ttl=600)
         if df.empty:
             return df
         return _rename_cols(df)
@@ -381,7 +381,7 @@ def load_year_data(y: int) -> pd.DataFrame:
         ORDER BY timestamp DESC
     """
     try:
-        df = conn.query(sql, ttl=0)
+        df = conn.query(sql, ttl=600)
         if df.empty:
             return df
         df = _rename_cols(df, {'mes_num': '_mes'})
@@ -416,6 +416,7 @@ def append_ont_record(record: dict) -> bool:
         with conn.session as s:
             s.execute(sql, params)
             s.commit()
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"Error guardando registro: {e}")
@@ -427,6 +428,7 @@ def soft_delete_record(record_id) -> bool:
         with conn.session as s:
             s.execute(sql, {"id": record_id})
             s.commit()
+        st.cache_data.clear()
         return True
     except Exception:
         return False
@@ -581,280 +583,281 @@ with tabs[t_idx]:
 
     if df_cur.empty:
         st.info("ℹ️ No hay registros para este mes. Comienza registrando un movimiento.")
-        st.stop()
+        pass  # Eliminado st.stop() para no romper tabs
+    else:
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("📦 Total Acciones",          kpi['total'])
-    c2.metric("✅ Positivas",               kpi['pos'])
-    c3.metric("⚠️ Negativas",              kpi['neg'])
-    c4.metric("🔄 Neutrales",              kpi['neu'])
-    c5.metric("⚖️ Balance Neto",           kpi['balance'],
-              delta_color="normal" if kpi['balance'] >= 0 else "inverse")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("📦 Total Acciones",          kpi['total'])
+        c2.metric("✅ Positivas",               kpi['pos'])
+        c3.metric("⚠️ Negativas",              kpi['neg'])
+        c4.metric("🔄 Neutrales",              kpi['neu'])
+        c5.metric("⚖️ Balance Neto",           kpi['balance'],
+                  delta_color="normal" if kpi['balance'] >= 0 else "inverse")
 
-    st.divider()
+        st.divider()
 
-    # ─────────────────────────────────────────────────────────────
-    # KPI 2 — Cantidad de acciones por tipo (motivo)
-    # ─────────────────────────────────────────────────────────────
-    st.markdown("### 2️⃣ Acciones por Tipo de Operación (Motivo)")
+        # ─────────────────────────────────────────────────────────────
+        # KPI 2 — Cantidad de acciones por tipo (motivo)
+        # ─────────────────────────────────────────────────────────────
+        st.markdown("### 2️⃣ Acciones por Tipo de Operación (Motivo)")
 
-    if kpi['por_motivo']:
-        pm_df = (
-            pd.DataFrame(list(kpi['por_motivo'].items()), columns=['Motivo', 'Cantidad'])
-            .sort_values('Cantidad', ascending=True)
-        )
-        pm_df['Tipo']  = pm_df['Motivo'].map(lambda x: tipo_map.get(x, 'neutral'))
-        pm_df['Color'] = pm_df['Tipo'].map(lambda x: TIPO_COLOR.get(x, COLOR_WARN))
-
-        col_bar, col_pie = st.columns(2)
-        with col_bar:
-            fig_mot = px.bar(
-                pm_df, x='Cantidad', y='Motivo', orientation='h',
-                text_auto=True,
-                title="Cantidad de Acciones por Motivo",
+        if kpi['por_motivo']:
+            pm_df = (
+                pd.DataFrame(list(kpi['por_motivo'].items()), columns=['Motivo', 'Cantidad'])
+                .sort_values('Cantidad', ascending=True)
             )
-            fig_mot.update_traces(marker_color=pm_df['Color'].tolist())
-            fig_mot.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)', height=380,
-                margin=dict(l=0, r=0, t=40, b=0),
-            )
-            st.plotly_chart(fig_mot, use_container_width=True)
+            pm_df['Tipo']  = pm_df['Motivo'].map(lambda x: tipo_map.get(x, 'neutral'))
+            pm_df['Color'] = pm_df['Tipo'].map(lambda x: TIPO_COLOR.get(x, COLOR_WARN))
 
-        with col_pie:
-            pie_df = pd.DataFrame({
-                'Tipo':     ['Positivo', 'Negativo', 'Neutral'],
-                'Cantidad': [kpi['pos'], kpi['neg'], kpi['neu']],
-            })
-            fig_pie = px.pie(
-                pie_df, names='Tipo', values='Cantidad', hole=0.5,
-                color_discrete_sequence=[COLOR_TEAL, COLOR_DANGER, COLOR_WARN],
-                title="Distribución por Tipo",
-            )
-            fig_pie.update_traces(textinfo='percent+label', textposition='inside')
-            fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=380, showlegend=False)
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-        # Mini KPIs por motivo
-        motivo_items = sorted(kpi['por_motivo'].items(), key=lambda x: x[1], reverse=True)
-        cols_per_row = 4
-        for i in range(0, len(motivo_items), cols_per_row):
-            row_items = motivo_items[i:i + cols_per_row]
-            cols = st.columns(cols_per_row)
-            for j, (mot, cnt) in enumerate(row_items):
-                tipo_m = tipo_map.get(mot, 'neutral')
-                emoji  = TIPO_EMOJI.get(tipo_m, '⚪')
-                cols[j].metric(f"{emoji} {mot}", cnt)
-
-    st.divider()
-
-    # ─────────────────────────────────────────────────────────────
-    # KPI 3 — Cantidad de acciones por zona (general)
-    # ─────────────────────────────────────────────────────────────
-    st.markdown("### 3️⃣ Acciones por Zona (General)")
-
-    if kpi['por_zona']:
-        z_df = (
-            pd.DataFrame(list(kpi['por_zona'].items()), columns=['Zona', 'Operaciones'])
-            .sort_values('Operaciones', ascending=False)
-        )
-        fig_z = px.bar(
-            z_df, x='Zona', y='Operaciones', text_auto=True,
-            color='Operaciones',
-            color_continuous_scale=[[0, '#1d2c59'], [0.5, COLOR_PRIMARY], [1, COLOR_TEAL]],
-            title=f"Total de Acciones por Zona — {mes_sel} {anio}",
-        )
-        fig_z.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)', height=380,
-            margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
-        )
-        st.plotly_chart(fig_z, use_container_width=True)
-
-        # Mini KPIs por zona
-        zona_items = sorted(kpi['por_zona'].items(), key=lambda x: x[1], reverse=True)
-        cols_per_row = 4
-        for i in range(0, len(zona_items), cols_per_row):
-            row_items = zona_items[i:i + cols_per_row]
-            cols = st.columns(cols_per_row)
-            for j, (zona, cnt) in enumerate(row_items):
-                cols[j].metric(f"🗺️ {zona}", cnt)
-
-    st.divider()
-
-    # ─────────────────────────────────────────────────────────────
-    # KPI 4 — Acciones por tipo (motivo) por zona
-    # ─────────────────────────────────────────────────────────────
-    st.markdown("### 4️⃣ Acciones por Tipo de Operación · Por Zona")
-
-    col4a, col4b = st.columns(2)
-
-    # Gráfica apilada por tipo (Positivo / Negativo / Neutral) por zona
-    with col4a:
-        if not kpi['por_zona_tipo'].empty:
-            fig_zt = px.bar(
-                kpi['por_zona_tipo'], x='Zona', y='N', color='Tipo',
-                barmode='stack', text_auto=True,
-                color_discrete_map={
-                    'Positive': COLOR_TEAL,
-                    'Negative': COLOR_DANGER,
-                    'Neutral':  COLOR_WARN,
-                },
-                title="Tipo de Operación por Zona (apilado)",
-            )
-            fig_zt.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)', height=400,
-                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
-            )
-            st.plotly_chart(fig_zt, use_container_width=True)
-
-    # Gráfica agrupada por motivo específico por zona
-    with col4b:
-        if not kpi['por_zona_motivo'].empty:
-            fig_zm = px.bar(
-                kpi['por_zona_motivo'], x='Zona', y='N', color='Motivo',
-                barmode='group', text_auto=True,
-                title="Motivo Específico por Zona (agrupado)",
-            )
-            fig_zm.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)', height=400,
-                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
-            )
-            st.plotly_chart(fig_zm, use_container_width=True)
-
-    st.divider()
-
-    # ─────────────────────────────────────────────────────────────
-    # KPI 5 — Balance por zona según cada acción
-    # ─────────────────────────────────────────────────────────────
-    st.markdown("### 5️⃣ Balance por Zona")
-
-    if not kpi['balance_por_zona'].empty:
-        bpz = kpi['balance_por_zona']
-
-        col5a, col5b = st.columns(2)
-
-        with col5a:
-            # Balance neto por zona
-            colors_balance = [COLOR_TEAL if b >= 0 else COLOR_DANGER for b in bpz['Balance']]
-            fig_bal = go.Figure()
-            fig_bal.add_trace(go.Bar(
-                x=bpz['Zona'],
-                y=bpz['Balance'],
-                text=bpz['Balance'],
-                textposition='outside',
-                marker_color=colors_balance,
-                name='Balance Neto',
-            ))
-            fig_bal.update_layout(
-                title="Balance Neto por Zona (Positivos − Negativos)",
-                paper_bgcolor='rgba(0,0,0,0)',
-                height=380,
-                margin=dict(l=0, r=0, t=40, b=0),
-                xaxis_tickangle=-30,
-            )
-            fig_bal.add_hline(y=0, line_dash="dash", line_color="#555")
-            st.plotly_chart(fig_bal, use_container_width=True)
-
-        with col5b:
-            # Positivos vs Negativos por zona lado a lado
-            fig_pn = go.Figure()
-            fig_pn.add_trace(go.Bar(
-                x=bpz['Zona'], y=bpz['Positivos'],
-                name='Positivos', marker_color=COLOR_TEAL, text=bpz['Positivos'],
-                textposition='outside',
-            ))
-            fig_pn.add_trace(go.Bar(
-                x=bpz['Zona'], y=bpz['Negativos'],
-                name='Negativos', marker_color=COLOR_DANGER, text=bpz['Negativos'],
-                textposition='outside',
-            ))
-            fig_pn.update_layout(
-                barmode='group',
-                title="Positivos vs Negativos por Zona",
-                paper_bgcolor='rgba(0,0,0,0)',
-                height=380,
-                margin=dict(l=0, r=0, t=40, b=0),
-                xaxis_tickangle=-30,
-            )
-            st.plotly_chart(fig_pn, use_container_width=True)
-
-        # Mini KPIs de balance por zona
-        bpz_sorted = bpz.sort_values('Balance', ascending=False)
-        cols_per_row = 4
-        for i in range(0, len(bpz_sorted), cols_per_row):
-            row_items = bpz_sorted.iloc[i:i + cols_per_row]
-            cols = st.columns(cols_per_row)
-            for j, (_, row) in enumerate(row_items.iterrows()):
-                bal = int(row['Balance'])
-                cols[j].metric(
-                    f"⚖️ {row['Zona']}",
-                    bal,
-                    delta_color="normal" if bal >= 0 else "inverse",
+            col_bar, col_pie = st.columns(2)
+            with col_bar:
+                fig_mot = px.bar(
+                    pm_df, x='Cantidad', y='Motivo', orientation='h',
+                    text_auto=True,
+                    title="Cantidad de Acciones por Motivo",
                 )
+                fig_mot.update_traces(marker_color=pm_df['Color'].tolist())
+                fig_mot.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)', height=380,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                )
+                st.plotly_chart(fig_mot, use_container_width=True)
 
-    st.divider()
-
-    # ─────────────────────────────────────────────────────────────
-    # KPI 6 — Equipos recuperados (general y por zona)
-    # ─────────────────────────────────────────────────────────────
-    st.markdown("### 6️⃣ Estado de Equipos Instalados (Recuperados vs Nuevos)")
-
-    c6a, c6b, c6c = st.columns(3)
-    c6a.metric("♻️ Equipos Recuperados", kpi['recuperados_total'])
-    c6b.metric("🆕 Equipos Nuevos",      kpi['nuevos_total'])
-    c6c.metric("➖ No Aplica",           kpi['no_aplica_total'])
-
-    if not kpi['recuperados_por_zona'].empty:
-        rec_zona_df = kpi['recuperados_por_zona']
-
-        col6a, col6b = st.columns(2)
-
-        with col6a:
-            # Stacked: Recuperado / Nuevo / No Aplica por zona
-            fig_rec = px.bar(
-                rec_zona_df[rec_zona_df['Estado'] != 'No Aplica'],
-                x='Zona', y='N', color='Estado',
-                barmode='stack', text_auto=True,
-                color_discrete_map={
-                    'Recuperado': COLOR_REC,
-                    'Nuevo':      COLOR_NEW,
-                },
-                title="Recuperados vs Nuevos por Zona",
-            )
-            fig_rec.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)', height=380,
-                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
-            )
-            st.plotly_chart(fig_rec, use_container_width=True)
-
-        with col6b:
-            # Pie total recuperados vs nuevos
-            if kpi['recuperados_total'] + kpi['nuevos_total'] > 0:
-                pie_eq = pd.DataFrame({
-                    'Estado':   ['Recuperado', 'Nuevo'],
-                    'Cantidad': [kpi['recuperados_total'], kpi['nuevos_total']],
+            with col_pie:
+                pie_df = pd.DataFrame({
+                    'Tipo':     ['Positivo', 'Negativo', 'Neutral'],
+                    'Cantidad': [kpi['pos'], kpi['neg'], kpi['neu']],
                 })
-                fig_pie_eq = px.pie(
-                    pie_eq, names='Estado', values='Cantidad', hole=0.5,
-                    color_discrete_map={'Recuperado': COLOR_REC, 'Nuevo': COLOR_NEW},
-                    title="Distribución Global: Recuperados vs Nuevos",
+                fig_pie = px.pie(
+                    pie_df, names='Tipo', values='Cantidad', hole=0.5,
+                    color_discrete_sequence=[COLOR_TEAL, COLOR_DANGER, COLOR_WARN],
+                    title="Distribución por Tipo",
                 )
-                fig_pie_eq.update_traces(textinfo='percent+label', textposition='inside')
-                fig_pie_eq.update_layout(
-                    paper_bgcolor='rgba(0,0,0,0)', height=380, showlegend=False,
-                )
-                st.plotly_chart(fig_pie_eq, use_container_width=True)
+                fig_pie.update_traces(textinfo='percent+label', textposition='inside')
+                fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=380, showlegend=False)
+                st.plotly_chart(fig_pie, use_container_width=True)
 
-        # Mini KPIs: recuperados por zona
-        rec_only = rec_zona_df[rec_zona_df['Estado'] == 'Recuperado'].set_index('Zona')['N'].to_dict()
-        if rec_only:
-            st.markdown("**♻️ Equipos Recuperados por Zona:**")
-            zona_rec_items = sorted(rec_only.items(), key=lambda x: x[1], reverse=True)
-            cols_per_row   = 4
-            for i in range(0, len(zona_rec_items), cols_per_row):
-                row_items = zona_rec_items[i:i + cols_per_row]
+            # Mini KPIs por motivo
+            motivo_items = sorted(kpi['por_motivo'].items(), key=lambda x: x[1], reverse=True)
+            cols_per_row = 4
+            for i in range(0, len(motivo_items), cols_per_row):
+                row_items = motivo_items[i:i + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for j, (mot, cnt) in enumerate(row_items):
+                    tipo_m = tipo_map.get(mot, 'neutral')
+                    emoji  = TIPO_EMOJI.get(tipo_m, '⚪')
+                    cols[j].metric(f"{emoji} {mot}", cnt)
+
+        st.divider()
+
+        # ─────────────────────────────────────────────────────────────
+        # KPI 3 — Cantidad de acciones por zona (general)
+        # ─────────────────────────────────────────────────────────────
+        st.markdown("### 3️⃣ Acciones por Zona (General)")
+
+        if kpi['por_zona']:
+            z_df = (
+                pd.DataFrame(list(kpi['por_zona'].items()), columns=['Zona', 'Operaciones'])
+                .sort_values('Operaciones', ascending=False)
+            )
+            fig_z = px.bar(
+                z_df, x='Zona', y='Operaciones', text_auto=True,
+                color='Operaciones',
+                color_continuous_scale=[[0, '#1d2c59'], [0.5, COLOR_PRIMARY], [1, COLOR_TEAL]],
+                title=f"Total de Acciones por Zona — {mes_sel} {anio}",
+            )
+            fig_z.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)', height=380,
+                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+            )
+            st.plotly_chart(fig_z, use_container_width=True)
+
+            # Mini KPIs por zona
+            zona_items = sorted(kpi['por_zona'].items(), key=lambda x: x[1], reverse=True)
+            cols_per_row = 4
+            for i in range(0, len(zona_items), cols_per_row):
+                row_items = zona_items[i:i + cols_per_row]
                 cols = st.columns(cols_per_row)
                 for j, (zona, cnt) in enumerate(row_items):
-                    cols[j].metric(f"♻️ {zona}", cnt)
+                    cols[j].metric(f"🗺️ {zona}", cnt)
+
+        st.divider()
+
+        # ─────────────────────────────────────────────────────────────
+        # KPI 4 — Acciones por tipo (motivo) por zona
+        # ─────────────────────────────────────────────────────────────
+        st.markdown("### 4️⃣ Acciones por Tipo de Operación · Por Zona")
+
+        col4a, col4b = st.columns(2)
+
+        # Gráfica apilada por tipo (Positivo / Negativo / Neutral) por zona
+        with col4a:
+            if not kpi['por_zona_tipo'].empty:
+                fig_zt = px.bar(
+                    kpi['por_zona_tipo'], x='Zona', y='N', color='Tipo',
+                    barmode='stack', text_auto=True,
+                    color_discrete_map={
+                        'Positive': COLOR_TEAL,
+                        'Negative': COLOR_DANGER,
+                        'Neutral':  COLOR_WARN,
+                    },
+                    title="Tipo de Operación por Zona (apilado)",
+                )
+                fig_zt.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)', height=400,
+                    margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+                )
+                st.plotly_chart(fig_zt, use_container_width=True)
+
+        # Gráfica agrupada por motivo específico por zona
+        with col4b:
+            if not kpi['por_zona_motivo'].empty:
+                fig_zm = px.bar(
+                    kpi['por_zona_motivo'], x='Zona', y='N', color='Motivo',
+                    barmode='group', text_auto=True,
+                    title="Motivo Específico por Zona (agrupado)",
+                )
+                fig_zm.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)', height=400,
+                    margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+                )
+                st.plotly_chart(fig_zm, use_container_width=True)
+
+        st.divider()
+
+        # ─────────────────────────────────────────────────────────────
+        # KPI 5 — Balance por zona según cada acción
+        # ─────────────────────────────────────────────────────────────
+        st.markdown("### 5️⃣ Balance por Zona")
+
+        if not kpi['balance_por_zona'].empty:
+            bpz = kpi['balance_por_zona']
+
+            col5a, col5b = st.columns(2)
+
+            with col5a:
+                # Balance neto por zona
+                colors_balance = [COLOR_TEAL if b >= 0 else COLOR_DANGER for b in bpz['Balance']]
+                fig_bal = go.Figure()
+                fig_bal.add_trace(go.Bar(
+                    x=bpz['Zona'],
+                    y=bpz['Balance'],
+                    text=bpz['Balance'],
+                    textposition='outside',
+                    marker_color=colors_balance,
+                    name='Balance Neto',
+                ))
+                fig_bal.update_layout(
+                    title="Balance Neto por Zona (Positivos − Negativos)",
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    height=380,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    xaxis_tickangle=-30,
+                )
+                fig_bal.add_hline(y=0, line_dash="dash", line_color="#555")
+                st.plotly_chart(fig_bal, use_container_width=True)
+
+            with col5b:
+                # Positivos vs Negativos por zona lado a lado
+                fig_pn = go.Figure()
+                fig_pn.add_trace(go.Bar(
+                    x=bpz['Zona'], y=bpz['Positivos'],
+                    name='Positivos', marker_color=COLOR_TEAL, text=bpz['Positivos'],
+                    textposition='outside',
+                ))
+                fig_pn.add_trace(go.Bar(
+                    x=bpz['Zona'], y=bpz['Negativos'],
+                    name='Negativos', marker_color=COLOR_DANGER, text=bpz['Negativos'],
+                    textposition='outside',
+                ))
+                fig_pn.update_layout(
+                    barmode='group',
+                    title="Positivos vs Negativos por Zona",
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    height=380,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    xaxis_tickangle=-30,
+                )
+                st.plotly_chart(fig_pn, use_container_width=True)
+
+            # Mini KPIs de balance por zona
+            bpz_sorted = bpz.sort_values('Balance', ascending=False)
+            cols_per_row = 4
+            for i in range(0, len(bpz_sorted), cols_per_row):
+                row_items = bpz_sorted.iloc[i:i + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for j, (_, row) in enumerate(row_items.iterrows()):
+                    bal = int(row['Balance'])
+                    cols[j].metric(
+                        f"⚖️ {row['Zona']}",
+                        bal,
+                        delta_color="normal" if bal >= 0 else "inverse",
+                    )
+
+        st.divider()
+
+        # ─────────────────────────────────────────────────────────────
+        # KPI 6 — Equipos recuperados (general y por zona)
+        # ─────────────────────────────────────────────────────────────
+        st.markdown("### 6️⃣ Estado de Equipos Instalados (Recuperados vs Nuevos)")
+
+        c6a, c6b, c6c = st.columns(3)
+        c6a.metric("♻️ Equipos Recuperados", kpi['recuperados_total'])
+        c6b.metric("🆕 Equipos Nuevos",      kpi['nuevos_total'])
+        c6c.metric("➖ No Aplica",           kpi['no_aplica_total'])
+
+        if not kpi['recuperados_por_zona'].empty:
+            rec_zona_df = kpi['recuperados_por_zona']
+
+            col6a, col6b = st.columns(2)
+
+            with col6a:
+                # Stacked: Recuperado / Nuevo / No Aplica por zona
+                fig_rec = px.bar(
+                    rec_zona_df[rec_zona_df['Estado'] != 'No Aplica'],
+                    x='Zona', y='N', color='Estado',
+                    barmode='stack', text_auto=True,
+                    color_discrete_map={
+                        'Recuperado': COLOR_REC,
+                        'Nuevo':      COLOR_NEW,
+                    },
+                    title="Recuperados vs Nuevos por Zona",
+                )
+                fig_rec.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)', height=380,
+                    margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+                )
+                st.plotly_chart(fig_rec, use_container_width=True)
+
+            with col6b:
+                # Pie total recuperados vs nuevos
+                if kpi['recuperados_total'] + kpi['nuevos_total'] > 0:
+                    pie_eq = pd.DataFrame({
+                        'Estado':   ['Recuperado', 'Nuevo'],
+                        'Cantidad': [kpi['recuperados_total'], kpi['nuevos_total']],
+                    })
+                    fig_pie_eq = px.pie(
+                        pie_eq, names='Estado', values='Cantidad', hole=0.5,
+                        color_discrete_map={'Recuperado': COLOR_REC, 'Nuevo': COLOR_NEW},
+                        title="Distribución Global: Recuperados vs Nuevos",
+                    )
+                    fig_pie_eq.update_traces(textinfo='percent+label', textposition='inside')
+                    fig_pie_eq.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)', height=380, showlegend=False,
+                    )
+                    st.plotly_chart(fig_pie_eq, use_container_width=True)
+
+            # Mini KPIs: recuperados por zona
+            rec_only = rec_zona_df[rec_zona_df['Estado'] == 'Recuperado'].set_index('Zona')['N'].to_dict()
+            if rec_only:
+                st.markdown("**♻️ Equipos Recuperados por Zona:**")
+                zona_rec_items = sorted(rec_only.items(), key=lambda x: x[1], reverse=True)
+                cols_per_row   = 4
+                for i in range(0, len(zona_rec_items), cols_per_row):
+                    row_items = zona_rec_items[i:i + cols_per_row]
+                    cols = st.columns(cols_per_row)
+                    for j, (zona, cnt) in enumerate(row_items):
+                        cols[j].metric(f"♻️ {zona}", cnt)
 
 t_idx += 1
 
@@ -1073,6 +1076,7 @@ if role == 'admin' and len(tabs) > t_idx:
                         with conn.session as s:
                             s.execute(text("DELETE FROM zonas WHERE nombre = :z"), {"z": z})
                             s.commit()
+                        st.cache_data.clear()
                         _flash("🗑️ Zona eliminada.")
                         st.rerun()
                     except Exception as e:
@@ -1087,6 +1091,7 @@ if role == 'admin' and len(tabs) > t_idx:
                         with conn.session as s:
                             s.execute(text("INSERT INTO zonas (nombre) VALUES (:z)"), {"z": nz.strip()})
                             s.commit()
+                        st.cache_data.clear()
                         _flash("✅ Zona agregada.")
                         st.rerun()
                     except Exception as e:
@@ -1103,6 +1108,7 @@ if role == 'admin' and len(tabs) > t_idx:
                         with conn.session as s:
                             s.execute(text("DELETE FROM tecnicos WHERE nombre = :t"), {"t": tec})
                             s.commit()
+                        st.cache_data.clear()
                         _flash("🗑️ Técnico eliminado.")
                         st.rerun()
                     except Exception as e:
@@ -1117,6 +1123,7 @@ if role == 'admin' and len(tabs) > t_idx:
                         with conn.session as s:
                             s.execute(text("INSERT INTO tecnicos (nombre) VALUES (:t)"), {"t": nt.strip()})
                             s.commit()
+                        st.cache_data.clear()
                         _flash("✅ Técnico agregado.")
                         st.rerun()
                     except Exception:
@@ -1141,6 +1148,7 @@ if role == 'admin' and len(tabs) > t_idx:
                         with conn.session as s:
                             s.execute(text("DELETE FROM motivos WHERE motivo = :m"), {"m": mr.get('Motivo')})
                             s.commit()
+                        st.cache_data.clear()
                         _flash("🗑️ Motivo eliminado.")
                         st.rerun()
                     except Exception as e:
@@ -1163,6 +1171,7 @@ if role == 'admin' and len(tabs) > t_idx:
                                 {"m": nm.strip(), "t": ntm},
                             )
                             s.commit()
+                        st.cache_data.clear()
                         _flash("✅ Motivo agregado.")
                         st.rerun()
                     except Exception:
