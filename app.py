@@ -31,9 +31,9 @@ MESES = ("Enero","Febrero","Marzo","Abril","Mayo","Junio",
 SUPERADMIN = 'Admin'
 
 TIPO_LABEL = {
-    'positive': '✅ Positivo (Instalac. / Reconex.)',
+    'positive': '✅ Positivo (Instalac. / Reconex. / Cambio / Renov.)',
     'negative': '⚠️ Negativo (Problema / Desconex.)',
-    'neutral':  '🔄 Neutral (Cambio)',
+    'neutral':  '🔄 Neutral (Otros)',
 }
 TIPO_COLOR = {'positive': COLOR_TEAL, 'negative': COLOR_DANGER, 'neutral': COLOR_WARN}
 TIPO_EMOJI = {'positive': '🟢', 'negative': '🔴', 'neutral': '🟡'}
@@ -87,7 +87,7 @@ if st.session_state.flash_msg:
 
 # Conexión a Neon PostgreSQL
 try:
-    conn = st.connection("postgresql", type="sql")
+    conn = st.connection("postgresql", type="sql", pool_pre_ping=True)
 except Exception as e:
     st.error(f"⚠️ Error de conexión a la base de datos: {e}")
     st.info("Verifica tu archivo `.streamlit/secrets.toml` y que tengas instalada la librería `psycopg2-binary`.")
