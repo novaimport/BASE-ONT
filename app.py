@@ -2,11 +2,9 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import gspread
-from google.oauth2.service_account import Credentials
-import bcrypt, pytz, secrets, re, math
+import bcrypt, pytz, secrets, re
 from datetime import datetime, date, timedelta
-import calendar
+from sqlalchemy import text
 
 # ─────────────────────────────────────────────────────────────────────
 # 1. CONFIGURACIÓN GLOBAL
@@ -29,44 +27,6 @@ MESES = ("Enero","Febrero","Marzo","Abril","Mayo","Junio",
          "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre")
 
 SUPERADMIN    = 'Admin'
-SUPERADMIN_PW = 'Admin2024@'
-
-SH_USUARIOS = '_Usuarios'
-SH_ZONAS    = '_Zonas'
-SH_TECNICOS = '_Tecnicos'
-SH_MOTIVOS  = '_Motivos'
-
-DATA_COLS = [
-    'ID','Fecha','Asesor','Tecnico','Zona',
-    'SN_Eliminada','SN_Agregada','Motivo',
-    'Cod_Cliente','Nombre_Cliente','Orden_Trabajo',
-    'Descripcion','Timestamp','Eliminado'
-]
-
-USER_COLS = [
-    'username','password_hash','role',
-    'failed_attempts','locked_until','is_banned','session_token'
-]
-
-DEFAULT_MOTIVOS = [
-    ("Instalacion Nueva",             "positive"),
-    ("Reconexion",                    "positive"),
-    ("Cambio de cable TV a DoblePlay","positive"),
-    ("Desconexion",                   "negative"),
-    ("Cambio por Inestabilidad",      "negative"),
-    ("Cambio por ONT dañada",         "negative"),
-    ("Cambio por lentitud",           "negative"),
-    ("Cambio de Tecnologia",          "neutral"),
-    ("Cambio por Renovacion",         "neutral"),
-]
-
-DEFAULT_ZONAS = [
-    "El Rosario","ARG","Tepezontes","La Libertad","El Tunco",
-    "Costa del Sol","Zacatecoluca","Zaragoza","Santiago Nonualco",
-    "Rio Mar","San Salvador"
-]
-
-DEFAULT_TECNICOS = ["Tecnico 01","Tecnico 02","Tecnico 03"]
 
 TIPO_LABEL = {
     'positive': '✅ Positivo (Instalac. / Reconex.)',
@@ -97,17 +57,21 @@ button[data-baseweb="tab"][aria-selected="true"] p{color:#fff!important}
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────
-# 3. SESSION STATE
+# 3. SESSION STATE Y DB CONNECTION
 # ─────────────────────────────────────────────────────────────────────
 _DEFAULTS = {
     'logged_in': False, 'role': '', 'username': '',
     'log_u': '', 'log_p': '', 'log_err': '',
     'flash_msg': '', 'flash_type': '',
-    'data_version': 0, 'session_token': '', 'form_reset': 0,
+    'session_token': '', 'form_reset': 0,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
+
+def _flash(msg, kind='success'):
+    st.session_state.flash_msg = msg
+    st.session_state.flash_type = kind
 
 if st.session_state.flash_msg:
     if st.session_state.flash_type == 'error':
@@ -117,67 +81,16 @@ if st.session_state.flash_msg:
     st.session_state.flash_msg = ''
     st.session_state.flash_type = ''
 
-def _dv():    return st.session_state.get('data_version', 0)
-def _inv():   st.session_state.data_version = _dv() + 1
-def _flash(msg, kind='success'):
-    st.session_state.flash_msg = msg
-    st.session_state.flash_type = kind
+# Conexión a Neon PostgreSQL
+try:
+    conn = st.connection("postgresql", type="sql")
+except Exception as e:
+    st.error(f"⚠️ Error de conexión a la base de datos: {e}")
+    st.info("Verifica tu archivo `.streamlit/secrets.toml` y que tengas instalada la librería `psycopg2-binary`.")
+    st.stop()
 
 # ─────────────────────────────────────────────────────────────────────
-# 4. GOOGLE SHEETS CONNECTION
-# ─────────────────────────────────────────────────────────────────────
-_SCOPES = [
-    'https://spreadsheets.google.com/feeds',
-    'https://www.googleapis.com/auth/drive',
-]
-
-@st.cache_resource
-def _gc():
-    import json
-    if "gcp_service_account" not in st.secrets:
-        raise ValueError("Falta la llave 'gcp_service_account' en el archivo secrets.toml")
-    
-    sec = st.secrets["gcp_service_account"]
-    
-    # Si se pegó el JSON entero como un string:
-    if isinstance(sec, str):
-        try:
-            creds_dict = json.loads(sec)
-        except Exception as e:
-            raise ValueError(f"El formato JSON en secrets.toml es inválido: {e}")
-    else:
-        # Si se pegó usando el formato nativo de TOML:
-        creds_dict = dict(sec)
-        
-    creds = Credentials.from_service_account_info(creds_dict, scopes=_SCOPES)
-    return gspread.authorize(creds)
-
-@st.cache_resource
-def _ss():
-    # Buscamos el ID ya sea dentro de [sheets] o en la raíz del TOML
-    if "sheets" in st.secrets and "spreadsheet_id" in st.secrets["sheets"]:
-        sid = st.secrets["sheets"]["spreadsheet_id"]
-    elif "spreadsheet_id" in st.secrets:
-        sid = st.secrets["spreadsheet_id"]
-    else:
-        raise ValueError("Falta configurar el 'spreadsheet_id' en el archivo secrets.toml")
-        
-    return _gc().open_by_key(sid)
-
-def _ws(name: str) -> gspread.Worksheet:
-    return _ss().worksheet(name)
-
-def _get_or_create_ws(name: str, headers: list) -> gspread.Worksheet:
-    ss = _ss()
-    try:
-        return ss.worksheet(name)
-    except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=name, rows=2000, cols=len(headers) + 2)
-        ws.append_row(headers)
-        return ws
-
-# ─────────────────────────────────────────────────────────────────────
-# 5. PASSWORD HELPERS
+# 4. PASSWORD HELPERS
 # ─────────────────────────────────────────────────────────────────────
 def _hash(p: str) -> str:
     return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
@@ -202,163 +115,92 @@ def _validate_pw(p: str):
     return None
 
 # ─────────────────────────────────────────────────────────────────────
-# 6. INIT SYSTEM (se ejecuta una sola vez al arrancar)
+# 5. CATÁLOGOS (vía BD)
 # ─────────────────────────────────────────────────────────────────────
-def init_system():
-    ss   = _ss()
-    existing = {ws.title for ws in ss.worksheets()}
+def get_zonas() -> list:
+    df = conn.query("SELECT nombre as \"Zona\" FROM zonas ORDER BY nombre ASC", ttl=10)
+    return df["Zona"].tolist() if not df.empty else []
 
-    # ── Usuarios ──
-    if SH_USUARIOS not in existing:
-        ws_u = ss.add_worksheet(title=SH_USUARIOS, rows=500, cols=10)
-        ws_u.append_row(USER_COLS)
-        ws_u.append_row([SUPERADMIN, _hash(SUPERADMIN_PW), 'admin', 0, '', 'FALSE', ''])
-    else:
-        ws_u   = ss.worksheet(SH_USUARIOS)
-        data_u = ws_u.get_all_records()
-        if not any(r.get('username') == SUPERADMIN for r in data_u):
-            ws_u.append_row([SUPERADMIN, _hash(SUPERADMIN_PW), 'admin', 0, '', 'FALSE', ''])
+def get_tecnicos() -> list:
+    df = conn.query("SELECT nombre as \"Tecnico\" FROM tecnicos ORDER BY nombre ASC", ttl=10)
+    return df["Tecnico"].tolist() if not df.empty else []
 
-    # ── Zonas ──
-    if SH_ZONAS not in existing:
-        ws_z = ss.add_worksheet(title=SH_ZONAS, rows=200, cols=2)
-        ws_z.append_row(['Zona'])
-        for z in DEFAULT_ZONAS:
-            ws_z.append_row([z])
+def get_motivos_df() -> pd.DataFrame:
+    df = conn.query("SELECT motivo as \"Motivo\", tipo as \"Tipo\" FROM motivos ORDER BY motivo ASC", ttl=10)
+    return df
 
-    # ── Técnicos ──
-    if SH_TECNICOS not in existing:
-        ws_t = ss.add_worksheet(title=SH_TECNICOS, rows=200, cols=2)
-        ws_t.append_row(['Tecnico'])
-        for t in DEFAULT_TECNICOS:
-            ws_t.append_row([t])
+def get_motivos_list() -> list:
+    df = get_motivos_df()
+    return df["Motivo"].tolist() if not df.empty else []
 
-    # ── Motivos ──
-    if SH_MOTIVOS not in existing:
-        ws_m = ss.add_worksheet(title=SH_MOTIVOS, rows=200, cols=2)
-        ws_m.append_row(['Motivo', 'Tipo'])
-        for mot, tipo in DEFAULT_MOTIVOS:
-            ws_m.append_row([mot, tipo])
-
-try:
-    init_system()
-except Exception as _ei:
-    st.error(f"⚠️ Error inicializando el sistema.\n\nDetalles del error interno: `{repr(_ei)}`\n\n**Solución Manual Requerida en Google Sheets:**\n1. Ve a tu archivo de Google Sheets.\n2. Presiona el botón de **Compartir**.\n3. Agrega el correo electrónico de tu Service Account (el que termina en `gserviceaccount.com`).\n4. Asígnale permisos de **Editor**.\n5. Asegúrate de que el `spreadsheet_id` de tu archivo coincida con el configurado en tus Secrets.")
-    st.stop()
+def get_tipo_map() -> dict:
+    df = get_motivos_df()
+    if not df.empty:
+        return dict(zip(df["Motivo"], df["Tipo"]))
+    return {}
 
 # ─────────────────────────────────────────────────────────────────────
-# 7. CATÁLOGOS (cacheados)
+# 6. USER MANAGEMENT
 # ─────────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
-def get_zonas(v=0) -> list:
-    try:
-        data = _ws(SH_ZONAS).get_all_records()
-        return [r['Zona'] for r in data if r.get('Zona')] or DEFAULT_ZONAS[:]
-    except Exception:
-        return DEFAULT_ZONAS[:]
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_tecnicos(v=0) -> list:
-    try:
-        data = _ws(SH_TECNICOS).get_all_records()
-        return [r['Tecnico'] for r in data if r.get('Tecnico')] or DEFAULT_TECNICOS[:]
-    except Exception:
-        return DEFAULT_TECNICOS[:]
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_motivos_df(v=0) -> pd.DataFrame:
-    try:
-        data = _ws(SH_MOTIVOS).get_all_records()
-        df   = pd.DataFrame(data)
-        if not df.empty and 'Motivo' in df.columns:
-            return df
-        return pd.DataFrame(DEFAULT_MOTIVOS, columns=['Motivo', 'Tipo'])
-    except Exception:
-        return pd.DataFrame(DEFAULT_MOTIVOS, columns=['Motivo', 'Tipo'])
-
-def get_motivos_list(v=0) -> list:
-    return get_motivos_df(v=v)['Motivo'].tolist()
-
-def get_tipo_map(v=0) -> dict:
-    df = get_motivos_df(v=v)
-    if 'Tipo' in df.columns:
-        return dict(zip(df['Motivo'], df['Tipo']))
-    return {m: t for m, t in DEFAULT_MOTIVOS}
-
-def clear_cats():
-    get_zonas.clear()
-    get_tecnicos.clear()
-    get_motivos_df.clear()
-
-# ─────────────────────────────────────────────────────────────────────
-# 8. USER MANAGEMENT
-# ─────────────────────────────────────────────────────────────────────
-def _get_users_raw() -> list:
-    try:
-        return _ws(SH_USUARIOS).get_all_records()
-    except Exception:
-        return []
+def _get_users_raw() -> pd.DataFrame:
+    return conn.query("SELECT username, role, is_banned, failed_attempts FROM usuarios ORDER BY username ASC", ttl=5)
 
 def _find_user(username: str):
-    """Returns (row_idx_1based, user_dict) or (None, None)."""
-    try:
-        ws      = _ws(SH_USUARIOS)
-        records = ws.get_all_records()
-        for i, r in enumerate(records, start=2):
-            if r.get('username') == username:
-                return i, r, ws
-        return None, None, ws
-    except Exception:
-        return None, None, None
+    df = conn.query("SELECT * FROM usuarios WHERE username = :u", params={"u": username}, ttl=0)
+    if not df.empty:
+        return df.iloc[0].to_dict()
+    return None
 
 def _update_user_fields(username: str, fields: dict) -> bool:
+    if not fields: return True
+    set_clause = ", ".join([f"{k} = :{k}" for k in fields.keys()])
+    sql = text(f"UPDATE usuarios SET {set_clause} WHERE username = :username")
+    
+    params = fields.copy()
+    params["username"] = username
+    
     try:
-        ws     = _ws(SH_USUARIOS)
-        header = ws.row_values(1)
-        records = ws.get_all_records()
-        for i, r in enumerate(records, start=2):
-            if r.get('username') == username:
-                for field, value in fields.items():
-                    if field in header:
-                        col = header.index(field) + 1
-                        ws.update_cell(i, col, str(value) if value is not None else '')
-                return True
-        return False
-    except Exception:
+        with conn.session as s:
+            s.execute(sql, params)
+            s.commit()
+        return True
+    except Exception as e:
+        st.error(f"Error actualizando usuario: {e}")
         return False
 
-@st.cache_data(ttl=15, show_spinner=False)
-def _get_db_token(username: str, v=0) -> str:
-    _, user, _ = _find_user(username)
+def _get_db_token(username: str) -> str:
+    user = _find_user(username)
     return str(user.get('session_token', '')) if user else ''
 
 # ─────────────────────────────────────────────────────────────────────
-# 9. LOGIN
+# 7. LOGIN
 # ─────────────────────────────────────────────────────────────────────
 def do_login():
     u = st.session_state.log_u
     p = st.session_state.log_p
 
-    row_i, user, _ = _find_user(u)
+    user = _find_user(u)
     if not user:
         st.session_state.log_err = "❌ Credenciales incorrectas."
         st.session_state.log_u = st.session_state.log_p = ''
         return
 
-    now       = datetime.now(SV_TZ).replace(tzinfo=None)
-    is_banned = str(user.get('is_banned', 'FALSE')).upper() == 'TRUE'
-    fa        = int(user.get('failed_attempts', 0) or 0)
-    lu_str    = str(user.get('locked_until', ''))
+    now = datetime.now(SV_TZ).replace(tzinfo=None)
+    is_banned = bool(user.get('is_banned', False))
+    fa = int(user.get('failed_attempts', 0) or 0)
+    lu_str = user.get('locked_until')
 
-    if lu_str:
-        try:
-            lu = datetime.fromisoformat(lu_str)
-            if lu > now:
-                mins = int((lu - now).total_seconds() // 60) + 1
-                st.session_state.log_err = f"⏳ Cuenta bloqueada por {mins} min."
-                return
-        except Exception:
-            pass
+    if pd.notna(lu_str) and lu_str:
+        if isinstance(lu_str, str):
+            try: lu = datetime.fromisoformat(lu_str)
+            except: lu = lu_str
+        else:
+            lu = lu_str
+            
+        if isinstance(lu, datetime) and lu > now:
+            mins = int((lu - now).total_seconds() // 60) + 1
+            st.session_state.log_err = f"⏳ Cuenta bloqueada por {mins} min."
+            return
 
     if is_banned:
         st.session_state.log_err = "❌ Cuenta baneada permanentemente."
@@ -367,14 +209,11 @@ def do_login():
     if _check(p, str(user.get('password_hash', ''))):
         token = secrets.token_hex(32)
         _update_user_fields(u, {
-            'failed_attempts': 0, 'locked_until': '', 'session_token': token
+            'failed_attempts': 0, 'locked_until': None, 'session_token': token
         })
-        _get_db_token.clear()
         
-        # Asignar rol. Por defecto, si no tiene rol explícito se asigna como 'auditor'
         role_db = str(user.get('role', 'auditor')).lower()
-        if role_db not in ['admin', 'auditor']:
-            role_db = 'auditor' # Fallback para asegurar solo 2 roles
+        if role_db not in ['admin', 'auditor']: role_db = 'auditor'
             
         st.session_state.update({
             'logged_in': True, 'role': role_db,
@@ -383,10 +222,10 @@ def do_login():
     else:
         fa += 1
         if fa >= 6:
-            _update_user_fields(u, {'is_banned': 'TRUE', 'failed_attempts': fa})
+            _update_user_fields(u, {'is_banned': True, 'failed_attempts': fa})
             st.session_state.log_err = "❌ Cuenta baneada permanentemente."
         elif fa % 3 == 0:
-            lock_until = (now + timedelta(minutes=5)).isoformat()
+            lock_until = now + timedelta(minutes=5)
             _update_user_fields(u, {'locked_until': lock_until, 'failed_attempts': fa})
             st.session_state.log_err = "⏳ Demasiados intentos. Bloqueado 5 min."
         else:
@@ -419,7 +258,7 @@ if not st.session_state.logged_in:
 # ── Validación de sesión única ──
 _local_tok = st.session_state.get('session_token', '')
 if _local_tok:
-    _db_tok = _get_db_token(st.session_state.username, v=_dv())
+    _db_tok = _get_db_token(st.session_state.username)
     if _db_tok and _db_tok != _local_tok:
         for _k, _v in _DEFAULTS.items():
             st.session_state[_k] = _v
@@ -427,93 +266,78 @@ if _local_tok:
         st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────
-# 10. DATA FUNCTIONS (Google Sheets ↔ ONT Records)
+# 8. DATA FUNCTIONS (PostgreSQL)
 # ─────────────────────────────────────────────────────────────────────
-def _month_name(y: int, m: int) -> str:
-    return f"{MESES[m - 1]} {y}"
+def load_month_data(y: int, m: int) -> pd.DataFrame:
+    sql = """
+        SELECT id as "ID", fecha as "Fecha", asesor as "Asesor", tecnico as "Tecnico", 
+               zona as "Zona", sn_eliminada as "SN_Eliminada", sn_agregada as "SN_Agregada", 
+               motivo as "Motivo", cod_cliente as "Cod_Cliente", nombre_cliente as "Nombre_Cliente", 
+               orden_trabajo as "Orden_Trabajo", descripcion as "Descripcion"
+        FROM registros_ont 
+        WHERE EXTRACT(YEAR FROM fecha) = :y 
+          AND EXTRACT(MONTH FROM fecha) = :m 
+          AND eliminado = FALSE
+        ORDER BY timestamp DESC
+    """
+    df = conn.query(sql, params={"y": y, "m": m}, ttl=0)
+    return df
 
-def _get_month_ws(y: int, m: int) -> gspread.Worksheet:
-    return _get_or_create_ws(_month_name(y, m), DATA_COLS)
-
-@st.cache_data(ttl=60, show_spinner=False)
-def load_month_data(y: int, m: int, v=0) -> pd.DataFrame:
-    try:
-        data = _ws(_month_name(y, m)).get_all_records()
-        if not data:
-            return pd.DataFrame(columns=DATA_COLS)
-        df = pd.DataFrame(data)
-        # Exclude soft-deleted rows
-        if 'Eliminado' in df.columns:
-            df = df[df['Eliminado'].astype(str).str.upper() != 'TRUE'].copy()
-        return df
-    except gspread.WorksheetNotFound:
-        return pd.DataFrame(columns=DATA_COLS)
-    except Exception:
-        return pd.DataFrame(columns=DATA_COLS)
-
-@st.cache_data(ttl=60, show_spinner=False)
-def load_year_data(y: int, v=0) -> pd.DataFrame:
-    dfs = []
-    for m in range(1, 13):
-        df = load_month_data(y, m, v=v)
-        if not df.empty:
-            df = df.copy()
-            df['_mes']   = m
-            df['_mes_nm'] = MESES[m - 1]
-            dfs.append(df)
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=DATA_COLS)
+def load_year_data(y: int) -> pd.DataFrame:
+    sql = """
+        SELECT id as "ID", fecha as "Fecha", asesor as "Asesor", tecnico as "Tecnico", 
+               zona as "Zona", sn_eliminada as "SN_Eliminada", sn_agregada as "SN_Agregada", 
+               motivo as "Motivo", cod_cliente as "Cod_Cliente", nombre_cliente as "Nombre_Cliente", 
+               orden_trabajo as "Orden_Trabajo", descripcion as "Descripcion",
+               EXTRACT(MONTH FROM fecha) as "_mes"
+        FROM registros_ont 
+        WHERE EXTRACT(YEAR FROM fecha) = :y 
+          AND eliminado = FALSE
+        ORDER BY timestamp DESC
+    """
+    df = conn.query(sql, params={"y": y}, ttl=0)
+    return df
 
 def append_ont_record(record: dict) -> bool:
+    sql = text("""
+        INSERT INTO registros_ont 
+        (fecha, asesor, tecnico, zona, sn_eliminada, sn_agregada, motivo, cod_cliente, nombre_cliente, orden_trabajo, descripcion)
+        VALUES (:f, :a, :t, :z, :sne, :sna, :m, :cc, :nc, :ot, :d)
+    """)
+    params = {
+        "f": record.get('Fecha'),
+        "a": record.get('Asesor'),
+        "t": record.get('Tecnico'),
+        "z": record.get('Zona'),
+        "sne": record.get('SN_Eliminada', ''),
+        "sna": record.get('SN_Agregada', ''),
+        "m": record.get('Motivo'),
+        "cc": record.get('Cod_Cliente'),
+        "nc": record.get('Nombre_Cliente'),
+        "ot": record.get('Orden_Trabajo'),
+        "d": record.get('Descripcion', '')
+    }
     try:
-        fecha_str = record.get('Fecha', '')
-        dt  = datetime.strptime(fecha_str, '%Y-%m-%d') if isinstance(fecha_str, str) else fecha_str
-        ws  = _get_month_ws(dt.year, dt.month)
-        n   = len(ws.get_all_values())  # includes header → n-1 existing rows → ID = n
-        row = [
-            n,                                        # ID
-            record.get('Fecha', ''),
-            record.get('Asesor', ''),
-            record.get('Tecnico', ''),
-            record.get('Zona', ''),
-            record.get('SN_Eliminada', ''),
-            record.get('SN_Agregada', ''),
-            record.get('Motivo', ''),
-            record.get('Cod_Cliente', ''),
-            record.get('Nombre_Cliente', ''),
-            record.get('Orden_Trabajo', ''),
-            record.get('Descripcion', ''),
-            datetime.now(SV_TZ).strftime('%Y-%m-%d %H:%M:%S'),
-            'FALSE',
-        ]
-        ws.append_row(row)
-        load_month_data.clear()
-        load_year_data.clear()
+        with conn.session as s:
+            s.execute(sql, params)
+            s.commit()
         return True
     except Exception as e:
         st.error(f"Error guardando registro: {e}")
         return False
 
-def soft_delete_record(y: int, m: int, record_id) -> bool:
+def soft_delete_record(record_id) -> bool:
+    sql = text("UPDATE registros_ont SET eliminado = TRUE WHERE id = :id")
     try:
-        ws     = _ws(_month_name(y, m))
-        vals   = ws.get_all_values()
-        header = vals[0] if vals else []
-        if 'Eliminado' not in header or 'ID' not in header:
-            return False
-        elim_col = header.index('Eliminado') + 1
-        id_col   = header.index('ID') + 1
-        for i, row in enumerate(vals[1:], start=2):
-            if len(row) >= max(elim_col, id_col) and str(row[id_col - 1]) == str(record_id):
-                ws.update_cell(i, elim_col, 'TRUE')
-                load_month_data.clear()
-                load_year_data.clear()
-                return True
-        return False
+        with conn.session as s:
+            s.execute(sql, {"id": record_id})
+            s.commit()
+        return True
     except Exception:
         return False
 
 # ─────────────────────────────────────────────────────────────────────
-# 11. MÉTRICAS
+# 9. MÉTRICAS
 # ─────────────────────────────────────────────────────────────────────
 def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
     base = {
@@ -534,7 +358,6 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
     neg = sum(v for k, v in pm.items() if tipo_map.get(k, 'neutral') == 'negative')
     neu = total - pos - neg
 
-    # Per-zone by tipo
     pzt = pd.DataFrame()
     if 'Zona' in df.columns and 'Motivo' in df.columns:
         df2        = df.copy()
@@ -552,22 +375,17 @@ def _delta_str(cur, prv) -> str:
     return ('+' if d >= 0 else '') + str(d)
 
 def _delta_color(cur, prv, tipo: str) -> str:
-    """
-    positive motives: more = better → normal (verde si sube)
-    negative motives: less = better → inverse (verde si baja)
-    neutral: normal
-    """
     if tipo == 'negative':
         return 'inverse'
     return 'normal'
 
 # ─────────────────────────────────────────────────────────────────────
-# 12. SIDEBAR
+# 10. SIDEBAR
 # ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.caption(
         f"👤 **{st.session_state.username}** "
-        f"({st.session_state.role.capitalize()})  |  ONT Manager v2.0"
+        f"({st.session_state.role.capitalize()})  |  ONT Manager v3.0 (Neon)"
     )
     st.divider()
 
@@ -579,24 +397,22 @@ with st.sidebar:
     st.divider()
     if st.button("🚪 Cerrar Sesión", use_container_width=True):
         try:
-            _update_user_fields(st.session_state.username, {'session_token': ''})
+            _update_user_fields(st.session_state.username, {'session_token': None})
         except Exception:
             pass
-        _get_db_token.clear()
         st.session_state.clear()
         st.rerun()
 
     st.markdown("""
         <div style='margin-top:60px;text-align:center;color:#555;font-size:11px'>
-            📡 ISP ONT Manager<br>Powered by Google Sheets
+            📡 ISP ONT Manager<br>Powered by Neon DB
         </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────
-# 13. TABS
+# 11. TABS
 # ─────────────────────────────────────────────────────────────────────
 role = st.session_state.role
 
-# Roles definidos: admin y auditor. Auditor es el default.
 if role == 'admin':
     _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial","⚙️ Configuración"]
 else:
@@ -611,18 +427,16 @@ t_idx = 0
 with tabs[t_idx]:
     st.title(f"📊 Dashboard ONT — {mes_sel} {anio}")
 
-    tipo_map = get_tipo_map(v=_dv())
+    tipo_map = get_tipo_map()
 
-    # Load current + previous month
-    df_cur  = load_month_data(anio, m_idx, v=_dv())
+    df_cur  = load_month_data(anio, m_idx)
     pm_anio = anio - 1 if m_idx == 1 else anio
     pm_mes  = 12 if m_idx == 1 else m_idx - 1
-    df_prev = load_month_data(pm_anio, pm_mes, v=_dv())
+    df_prev = load_month_data(pm_anio, pm_mes)
 
     kpi  = calc_metrics(df_cur,  tipo_map)
     kpip = calc_metrics(df_prev, tipo_map)
 
-    # ── KPIs globales ──
     st.markdown("### 📈 Resumen del Mes")
     st.caption(f"*Variación vs {MESES[pm_mes - 1]} {pm_anio}*")
 
@@ -641,7 +455,6 @@ with tabs[t_idx]:
     if df_cur.empty:
         st.info("ℹ️ No hay registros para este mes. Comienza registrando un movimiento.")
     else:
-        # ── Por motivo ──
         st.divider()
         st.markdown("### 📋 Desglose por Motivo")
         col_mot, col_pie = st.columns(2)
@@ -671,7 +484,6 @@ with tabs[t_idx]:
                                   showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        # ── Por zona ──
         st.divider()
         st.markdown("### 🗺️ Análisis por Zona")
         col_z1, col_z2 = st.columns(2)
@@ -702,7 +514,6 @@ with tabs[t_idx]:
                                      margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30)
                 st.plotly_chart(fig_zt, use_container_width=True)
 
-        # ── Técnico y Asesor ──
         st.divider()
         col_tec, col_as = st.columns(2)
 
@@ -730,7 +541,6 @@ with tabs[t_idx]:
                                      margin=dict(l=0, r=0, t=40, b=0))
                 st.plotly_chart(fig_as, use_container_width=True)
 
-        # ── Balance Instalaciones vs Desconexiones ──
         st.divider()
         st.markdown("### ⚖️ Balance: Instalaciones & Reconexiones vs Desconexiones")
         b_col1, b_col2, b_col3 = st.columns(3)
@@ -746,7 +556,6 @@ with tabs[t_idx]:
                       f"{'▲' if neto >= 0 else '▼'} {abs(neto)}",
                       delta_color=color_neto)
 
-        # ── Comparación entre meses ──
         st.divider()
         st.markdown("### 📅 Comparación entre Meses")
 
@@ -764,7 +573,7 @@ with tabs[t_idx]:
             comp_rows = []
             for mc in meses_sel:
                 mi = MESES.index(mc) + 1
-                dfc = load_month_data(anio_comp, mi, v=_dv())
+                dfc = load_month_data(anio_comp, mi)
                 km  = calc_metrics(dfc, tipo_map)
                 comp_rows.append({
                     'Mes': mc, 'Total': km['total'],
@@ -790,7 +599,6 @@ with tabs[t_idx]:
                                    margin=dict(l=0, r=0, t=40, b=0))
             st.plotly_chart(fig_comp, use_container_width=True)
 
-            # Delta table
             st.markdown("**📉📈 Variación entre meses consecutivos seleccionados:**")
             for i in range(1, len(comp_rows)):
                 cur_c = comp_rows[i]
@@ -821,11 +629,10 @@ with tabs[t_idx]:
                 rc5.markdown(_cell("⚖️ Balance",    cur_c['Balance'],   prv_c['Balance'],   'positive'), unsafe_allow_html=True)
                 st.divider()
 
-        # ── Resumen Anual ──
         st.divider()
         st.markdown(f"### 📆 Tendencia Anual — {anio}")
         with st.spinner("Cargando datos anuales…"):
-            df_year = load_year_data(anio, v=_dv())
+            df_year = load_year_data(anio)
 
         if not df_year.empty:
             annual_rows = []
@@ -867,9 +674,9 @@ if role in ('admin', 'auditor'):
         st.title("📝 Registrar Movimiento de ONT")
         fk = st.session_state.form_reset
 
-        zonas_l = get_zonas(v=_dv())
-        tecs_l  = get_tecnicos(v=_dv())
-        mots_l  = get_motivos_list(v=_dv())
+        zonas_l = get_zonas()
+        tecs_l  = get_tecnicos()
+        mots_l  = get_motivos_list()
         today   = datetime.now(SV_TZ).date()
 
         with st.container(border=True):
@@ -921,12 +728,11 @@ if role in ('admin', 'auditor'):
                         'Orden_Trabajo':  ord_trab.strip(),
                         'Descripcion':    desc.strip(),
                     }
-                    with st.spinner("Guardando en Google Sheets…"):
+                    with st.spinner("Guardando en la base de datos…"):
                         ok = append_ont_record(record)
                     if ok:
-                        _inv()
                         st.session_state.form_reset += 1
-                        _flash("✅ Registro guardado exitosamente en Google Sheets.")
+                        _flash("✅ Registro guardado exitosamente en Neon DB.")
                         st.rerun()
 
     t_idx += 1
@@ -946,10 +752,10 @@ if role in ('admin', 'auditor'):
 
         if ver_todo:
             with st.spinner("Cargando historial anual…"):
-                df_hist = load_year_data(anio, v=_dv())
+                df_hist = load_year_data(anio)
             st.caption(f"Mostrando todos los registros de {anio}")
         else:
-            df_hist = load_month_data(anio, m_idx, v=_dv())
+            df_hist = load_month_data(anio, m_idx)
             st.caption(f"Mostrando registros de {mes_sel} {anio}")
 
         if bq and not df_hist.empty:
@@ -959,11 +765,12 @@ if role in ('admin', 'auditor'):
                 .any(axis=1)
             ]
 
-        # Hide internal columns
-        _hide = ['Eliminado', '_mes', '_mes_nm']
-        df_show = df_hist.drop(columns=[c for c in _hide if c in df_hist.columns], errors='ignore')
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-        st.caption(f"📊 Total registros mostrados: **{len(df_show)}**")
+        # Ocultamos la columna temporal _mes usada para el agrupamiento anual
+        if '_mes' in df_hist.columns:
+            df_hist = df_hist.drop(columns=['_mes'])
+            
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        st.caption(f"📊 Total registros mostrados: **{len(df_hist)}**")
 
         # ── Eliminar (solo admin) ──
         if role == 'admin' and not df_hist.empty and 'ID' in df_hist.columns:
@@ -973,25 +780,14 @@ if role in ('admin', 'auditor'):
 
                 def _lbl_id(x):
                     r = df_hist[df_hist['ID'] == x]
-                    if r.empty:
-                        return f"ID {x}"
+                    if r.empty: return f"ID {x}"
                     return (f"ID {x} | {r['Nombre_Cliente'].values[0]} | "
                             f"{r['Motivo'].values[0]} | {r['Zona'].values[0]}")
 
-                sel_del = st.selectbox("Selecciona el registro", ids_avail,
-                                       format_func=_lbl_id)
+                sel_del = st.selectbox("Selecciona el registro", ids_avail, format_func=_lbl_id)
                 if sel_del is not None:
-                    r_del = df_hist[df_hist['ID'] == sel_del].iloc[0]
-                    fecha_del_str = str(r_del.get('Fecha', f"{anio}-{m_idx:02d}-01"))
-                    try:
-                        dt_del = datetime.strptime(fecha_del_str[:7], '%Y-%m')
-                        y_del, m_del = dt_del.year, dt_del.month
-                    except Exception:
-                        y_del, m_del = anio, m_idx
-
                     if st.button("🗑️ Confirmar Eliminación", type="secondary", use_container_width=True):
-                        if soft_delete_record(y_del, m_del, sel_del):
-                            _inv()
+                        if soft_delete_record(sel_del):
                             _flash("🗑️ Registro eliminado del historial.")
                             st.rerun()
                         else:
@@ -1001,7 +797,7 @@ if role in ('admin', 'auditor'):
         st.divider()
         st.download_button(
             "📥 Descargar CSV",
-            df_show.to_csv(index=False).encode('utf-8'),
+            df_hist.to_csv(index=False).encode('utf-8'),
             f"ONT_{mes_sel}_{anio}.csv", "text/csv",
             use_container_width=True,
         )
@@ -1014,7 +810,7 @@ if role in ('admin', 'auditor'):
 if role == 'admin' and len(tabs) > t_idx:
     with tabs[t_idx]:
         st.markdown("### ⚙️ Configuración del Sistema")
-        st.caption("Los cambios en catálogos se reflejan inmediatamente en todos los formularios.")
+        st.caption("Los cambios en catálogos se reflejan inmediatamente en la base de datos.")
 
         t_z, t_tec, t_mot, t_usr = st.tabs(
             ["🗺️ Zonas", "🔧 Técnicos", "📋 Motivos", "👤 Usuarios"])
@@ -1022,18 +818,14 @@ if role == 'admin' and len(tabs) > t_idx:
         # ── Zonas ──
         with t_z:
             st.markdown("#### Gestión de Zonas / Nodos")
-            for z in get_zonas(v=_dv()):
+            for z in get_zonas():
                 cz1, cz2 = st.columns([5, 1])
                 cz1.text(f"🗺️  {z}")
                 if cz2.button("🗑️", key=f"dz_{z}", help="Eliminar zona"):
                     try:
-                        ws_z     = _ws(SH_ZONAS)
-                        recs     = ws_z.get_all_records()
-                        for i, r in enumerate(recs, 2):
-                            if r.get('Zona') == z:
-                                ws_z.delete_rows(i)
-                                break
-                        clear_cats(); _inv()
+                        with conn.session as s:
+                            s.execute(text("DELETE FROM zonas WHERE nombre = :z"), {"z": z})
+                            s.commit()
                         _flash("🗑️ Zona eliminada.")
                         st.rerun()
                     except Exception as e:
@@ -1043,27 +835,26 @@ if role == 'admin' and len(tabs) > t_idx:
                 st.markdown("**➕ Agregar Nueva Zona**")
                 nz = st.text_input("Nombre del nodo / zona")
                 if st.form_submit_button("Agregar Zona") and nz.strip():
-                    _get_or_create_ws(SH_ZONAS, ['Zona'])
-                    _ws(SH_ZONAS).append_row([nz.strip()])
-                    clear_cats(); _inv()
-                    _flash("✅ Zona agregada.")
-                    st.rerun()
+                    try:
+                        with conn.session as s:
+                            s.execute(text("INSERT INTO zonas (nombre) VALUES (:z)"), {"z": nz.strip()})
+                            s.commit()
+                        _flash("✅ Zona agregada.")
+                        st.rerun()
+                    except Exception as e:
+                        _flash("❌ La zona ya existe o hubo un error.", "error")
 
         # ── Técnicos ──
         with t_tec:
             st.markdown("#### Gestión de Técnicos de Campo")
-            for tec in get_tecnicos(v=_dv()):
+            for tec in get_tecnicos():
                 ct1, ct2 = st.columns([5, 1])
                 ct1.text(f"🔧  {tec}")
                 if ct2.button("🗑️", key=f"dt_{tec}", help="Eliminar técnico"):
                     try:
-                        ws_t = _ws(SH_TECNICOS)
-                        recs = ws_t.get_all_records()
-                        for i, r in enumerate(recs, 2):
-                            if r.get('Tecnico') == tec:
-                                ws_t.delete_rows(i)
-                                break
-                        clear_cats(); _inv()
+                        with conn.session as s:
+                            s.execute(text("DELETE FROM tecnicos WHERE nombre = :t"), {"t": tec})
+                            s.commit()
                         _flash("🗑️ Técnico eliminado.")
                         st.rerun()
                     except Exception as e:
@@ -1073,17 +864,20 @@ if role == 'admin' and len(tabs) > t_idx:
                 st.markdown("**➕ Agregar Nuevo Técnico**")
                 nt = st.text_input("Nombre completo del técnico")
                 if st.form_submit_button("Agregar Técnico") and nt.strip():
-                    _get_or_create_ws(SH_TECNICOS, ['Tecnico'])
-                    _ws(SH_TECNICOS).append_row([nt.strip()])
-                    clear_cats(); _inv()
-                    _flash("✅ Técnico agregado.")
-                    st.rerun()
+                    try:
+                        with conn.session as s:
+                            s.execute(text("INSERT INTO tecnicos (nombre) VALUES (:t)"), {"t": nt.strip()})
+                            s.commit()
+                        _flash("✅ Técnico agregado.")
+                        st.rerun()
+                    except:
+                        _flash("❌ El técnico ya existe o hubo un error.", "error")
 
         # ── Motivos ──
         with t_mot:
             st.markdown("#### Gestión de Motivos de Operación")
             st.info("🎨 **Verde** = Positivo (meta: subir)  |  **Rojo** = Negativo (meta: bajar)  |  **Naranja** = Neutral")
-            df_mots = get_motivos_df(v=_dv())
+            df_mots = get_motivos_df()
             for _, mr in df_mots.iterrows():
                 cm1, cm2, cm3 = st.columns([4, 2, 1])
                 cm1.text(f"📋  {mr.get('Motivo','')}")
@@ -1095,13 +889,9 @@ if role == 'admin' and len(tabs) > t_idx:
                 )
                 if cm3.button("🗑️", key=f"dm_{mr.get('Motivo','')}"):
                     try:
-                        ws_m = _ws(SH_MOTIVOS)
-                        recs = ws_m.get_all_records()
-                        for i, r in enumerate(recs, 2):
-                            if r.get('Motivo') == mr.get('Motivo'):
-                                ws_m.delete_rows(i)
-                                break
-                        clear_cats(); _inv()
+                        with conn.session as s:
+                            s.execute(text("DELETE FROM motivos WHERE motivo = :m"), {"m": mr.get('Motivo')})
+                            s.commit()
                         _flash("🗑️ Motivo eliminado.")
                         st.rerun()
                     except Exception as e:
@@ -1116,10 +906,14 @@ if role == 'admin' and len(tabs) > t_idx:
                     format_func=lambda x: TIPO_LABEL[x],
                 )
                 if st.form_submit_button("Agregar Motivo") and nm.strip():
-                    _ws(SH_MOTIVOS).append_row([nm.strip(), ntm])
-                    clear_cats(); _inv()
-                    _flash("✅ Motivo agregado.")
-                    st.rerun()
+                    try:
+                        with conn.session as s:
+                            s.execute(text("INSERT INTO motivos (motivo, tipo) VALUES (:m, :t)"), {"m": nm.strip(), "t": ntm})
+                            s.commit()
+                        _flash("✅ Motivo agregado.")
+                        st.rerun()
+                    except:
+                        _flash("❌ El motivo ya existe o hubo un error.", "error")
 
         # ── Usuarios ──
         with t_usr:
@@ -1143,15 +937,15 @@ if role == 'admin' and len(tabs) > t_idx:
                         if err_p:
                             st.error(err_p)
                         else:
-                            df_u_ex = pd.DataFrame(_get_users_raw())
-                            if not df_u_ex.empty and nu_u in df_u_ex.get('username', pd.Series()).values:
-                                st.error("❌ Ese nombre de usuario ya existe.")
-                            else:
-                                _get_or_create_ws(SH_USUARIOS, USER_COLS)
-                                _ws(SH_USUARIOS).append_row(
-                                    [nu_u, _hash(nu_p), nu_r, 0, '', 'FALSE', ''])
+                            try:
+                                with conn.session as s:
+                                    s.execute(text("INSERT INTO usuarios (username, password_hash, role) VALUES (:u, :p, :r)"),
+                                              {"u": nu_u, "p": _hash(nu_p), "r": nu_r})
+                                    s.commit()
                                 _flash("✅ Usuario creado.")
                                 st.rerun()
+                            except Exception:
+                                st.error("❌ Ese nombre de usuario ya existe o hubo un error.")
 
                 with st.form("reset_pw_form", clear_on_submit=True):
                     st.markdown("**Restablecer Contraseña**")
@@ -1165,20 +959,15 @@ if role == 'admin' and len(tabs) > t_idx:
                             ok = _update_user_fields(rpu, {
                                 'password_hash': _hash(rpp),
                                 'failed_attempts': 0,
-                                'locked_until': '',
+                                'locked_until': None,
                             })
                             if ok:
                                 _flash("✅ Contraseña actualizada.")
                                 st.rerun()
-                            else:
-                                st.error("❌ Usuario no encontrado.")
 
             with u_col2:
-                users_raw = _get_users_raw()
-                if users_raw:
-                    df_u_all = pd.DataFrame(users_raw)
-
-                    # Super admin — read-only
+                df_u_all = _get_users_raw()
+                if not df_u_all.empty:
                     df_sa = df_u_all[df_u_all['username'] == SUPERADMIN]
                     df_ot = df_u_all[df_u_all['username'] != SUPERADMIN].reset_index(drop=True)
 
@@ -1196,24 +985,20 @@ if role == 'admin' and len(tabs) > t_idx:
                             uc1, uc2, uc3, uc4, uc5 = st.columns([2, 1, 1, 1, 1])
                             uc1.markdown(f"**{ur['username']}**")
                             uc2.caption(ur.get('role', 'auditor'))
-                            is_banned_u = str(ur.get('is_banned', 'FALSE')).upper() == 'TRUE'
+                            is_banned_u = bool(ur.get('is_banned', False))
                             fa_u        = int(ur.get('failed_attempts', 0) or 0)
                             uc3.caption(f"{'🚫 Baneado' if is_banned_u else '✅ Activo'}")
                             uc4.caption(f"{fa_u} int. fallidos")
 
                             with uc5:
                                 if is_banned_u:
-                                    if st.button("♻️", key=f"unban_{ur['username']}",
-                                                 help="Desbanear usuario"):
-                                        _update_user_fields(ur['username'], {
-                                            'is_banned': 'FALSE', 'failed_attempts': 0,
-                                        })
+                                    if st.button("♻️", key=f"unban_{ur['username']}", help="Desbanear"):
+                                        _update_user_fields(ur['username'], {'is_banned': False, 'failed_attempts': 0})
                                         _flash(f"✅ Usuario {ur['username']} desbaneado.")
                                         st.rerun()
                                 else:
-                                    if st.button("🚫", key=f"ban_{ur['username']}",
-                                                 help="Banear usuario"):
-                                        _update_user_fields(ur['username'], {'is_banned': 'TRUE'})
+                                    if st.button("🚫", key=f"ban_{ur['username']}", help="Banear"):
+                                        _update_user_fields(ur['username'], {'is_banned': True})
                                         _flash(f"🚫 Usuario {ur['username']} baneado.")
                                         st.rerun()
 
@@ -1225,14 +1010,14 @@ if role == 'admin' and len(tabs) > t_idx:
                                     _flash("❌ No puedes eliminar tu propia cuenta.", 'error')
                                     st.rerun()
                                 else:
-                                    ws_u  = _ws(SH_USUARIOS)
-                                    recs  = ws_u.get_all_records()
-                                    for i, r in enumerate(recs, 2):
-                                        if r.get('username') == ur['username']:
-                                            ws_u.delete_rows(i)
-                                            break
-                                    _flash(f"🗑️ Usuario {ur['username']} eliminado.")
-                                    st.rerun()
+                                    try:
+                                        with conn.session as s:
+                                            s.execute(text("DELETE FROM usuarios WHERE username = :u"), {"u": ur['username']})
+                                            s.commit()
+                                        _flash(f"🗑️ Usuario {ur['username']} eliminado.")
+                                        st.rerun()
+                                    except Exception as e:
+                                        _flash(f"❌ Error al eliminar: {e}", "error")
                             st.divider()
                 else:
                     st.info("No hay usuarios registrados aún.")
