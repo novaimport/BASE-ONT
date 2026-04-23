@@ -6,3 +6,4 @@ pytz
 reportlab
 gspread
 google-auth
+streamlit-autorefresh
