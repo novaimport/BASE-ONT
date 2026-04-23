@@ -116,18 +116,44 @@ def _validate_pw(p: str):
 
 # ─────────────────────────────────────────────────────────────────────
 # 5. CATÁLOGOS (vía BD)
+# FIX: Eliminados alias con comillas dobles escapadas que causan
+#      pandas.errors.DatabaseError en SQLAlchemy moderno / Python 3.14.
+#      Ahora se seleccionan columnas sin alias y se renombran en Python.
 # ─────────────────────────────────────────────────────────────────────
 def get_zonas() -> list:
-    df = conn.query("SELECT nombre as \"Zona\" FROM zonas ORDER BY nombre ASC", ttl=10)
-    return df["Zona"].tolist() if not df.empty else []
+    try:
+        df = conn.query("SELECT nombre FROM zonas ORDER BY nombre ASC", ttl=10)
+        if df.empty:
+            return []
+        # El driver puede devolver 'nombre' en minúsculas
+        col = df.columns[0]
+        return df[col].tolist()
+    except Exception as e:
+        st.error(f"Error cargando zonas: {e}")
+        return []
 
 def get_tecnicos() -> list:
-    df = conn.query("SELECT nombre as \"Tecnico\" FROM tecnicos ORDER BY nombre ASC", ttl=10)
-    return df["Tecnico"].tolist() if not df.empty else []
+    try:
+        df = conn.query("SELECT nombre FROM tecnicos ORDER BY nombre ASC", ttl=10)
+        if df.empty:
+            return []
+        col = df.columns[0]
+        return df[col].tolist()
+    except Exception as e:
+        st.error(f"Error cargando técnicos: {e}")
+        return []
 
 def get_motivos_df() -> pd.DataFrame:
-    df = conn.query("SELECT motivo as \"Motivo\", tipo as \"Tipo\" FROM motivos ORDER BY motivo ASC", ttl=10)
-    return df
+    try:
+        df = conn.query("SELECT motivo, tipo FROM motivos ORDER BY motivo ASC", ttl=10)
+        if df.empty:
+            return pd.DataFrame(columns=['Motivo', 'Tipo'])
+        # Normalizar nombres de columna (pueden venir en minúsculas)
+        df.columns = [c.lower() for c in df.columns]
+        return df.rename(columns={'motivo': 'Motivo', 'tipo': 'Tipo'})
+    except Exception as e:
+        st.error(f"Error cargando motivos: {e}")
+        return pd.DataFrame(columns=['Motivo', 'Tipo'])
 
 def get_motivos_list() -> list:
     df = get_motivos_df()
@@ -143,14 +169,15 @@ def get_tipo_map() -> dict:
 # 6. USER MANAGEMENT
 # ─────────────────────────────────────────────────────────────────────
 def _get_users_raw() -> pd.DataFrame:
-    return conn.query(
-        "SELECT username, role, is_banned, failed_attempts FROM usuarios ORDER BY username ASC",
-        ttl=5,
-    )
+    try:
+        return conn.query(
+            "SELECT username, role, is_banned, failed_attempts FROM usuarios ORDER BY username ASC",
+            ttl=5,
+        )
+    except Exception as e:
+        st.error(f"Error cargando usuarios: {e}")
+        return pd.DataFrame()
 
-# BUG FIX #1: Antes usaba %(u)s (sintaxis psycopg2 nativo) que SQLAlchemy
-# no reconoce. Ahora usa conn.session con text() y :param style, igual que
-# el resto de las funciones de escritura.
 def _find_user(username: str):
     try:
         with conn.session as s:
@@ -184,8 +211,6 @@ def _update_user_fields(username: str, fields: dict) -> bool:
 
 def _get_db_token(username: str) -> str:
     user = _find_user(username)
-    # BUG FIX #2: Antes podía lanzar AttributeError si user era None
-    # y se accedía sin comprobar. Ahora es seguro.
     if user is None:
         return ''
     return str(user.get('session_token') or '')
@@ -204,17 +229,12 @@ def do_login():
         st.session_state.log_p   = ''
         return
 
-    # BUG FIX #3: Se usaba datetime.now(SV_TZ).replace(tzinfo=None) para
-    # quitar la zona horaria y luego se comparaba contra lu (que podría tener
-    # o no tzinfo). Ahora siempre se trabaja en naive UTC local para coherencia.
     now = datetime.now(SV_TZ).replace(tzinfo=None)
 
     is_banned = bool(user.get('is_banned', False))
     fa        = int(user.get('failed_attempts', 0) or 0)
     lu_str    = user.get('locked_until')
 
-    # BUG FIX #4: La conversión de locked_until era frágil; se añade manejo
-    # explícito para objetos datetime con tzinfo (los quita para comparar).
     if lu_str is not None and lu_str != '':
         try:
             if isinstance(lu_str, str):
@@ -225,7 +245,6 @@ def do_login():
                 lu = None
 
             if lu is not None:
-                # Normalizar a naive
                 if lu.tzinfo is not None:
                     lu = lu.astimezone(SV_TZ).replace(tzinfo=None)
                 if lu > now:
@@ -233,7 +252,7 @@ def do_login():
                     st.session_state.log_err = f"⏳ Cuenta bloqueada por {mins} min."
                     return
         except Exception:
-            pass  # Si no se puede parsear, ignoramos el bloqueo
+            pass
 
     if is_banned:
         st.session_state.log_err = "❌ Cuenta baneada permanentemente."
@@ -294,9 +313,6 @@ if not st.session_state.logged_in:
     st.stop()
 
 # ── Validación de sesión única ──
-# BUG FIX #5: Si _find_user falla (DB caída, etc.) el token devuelto era ''
-# y se cerraba la sesión erróneamente. Ahora solo expulsa si el token de DB
-# es NO vacío y diferente al local.
 _local_tok = st.session_state.get('session_token', '')
 if _local_tok:
     _db_tok = _get_db_token(st.session_state.username)
@@ -308,34 +324,74 @@ if _local_tok:
 
 # ─────────────────────────────────────────────────────────────────────
 # 8. DATA FUNCTIONS (PostgreSQL)
+# FIX: Eliminados alias con comillas dobles escapadas. Se usan nombres
+#      de columna en minúsculas y se renombran con df.rename() después
+#      de la consulta para mantener compatibilidad con el resto del código.
 # ─────────────────────────────────────────────────────────────────────
+_COL_MAP = {
+    'id':             'ID',
+    'fecha':          'Fecha',
+    'asesor':         'Asesor',
+    'tecnico':        'Tecnico',
+    'zona':           'Zona',
+    'sn_eliminada':   'SN_Eliminada',
+    'sn_agregada':    'SN_Agregada',
+    'motivo':         'Motivo',
+    'cod_cliente':    'Cod_Cliente',
+    'nombre_cliente': 'Nombre_Cliente',
+    'orden_trabajo':  'Orden_Trabajo',
+    'descripcion':    'Descripcion',
+}
+
+def _rename_cols(df: pd.DataFrame, extra: dict = None) -> pd.DataFrame:
+    """Normaliza nombres de columna a minúsculas y aplica el mapa estándar."""
+    df.columns = [c.lower() for c in df.columns]
+    mapping = dict(_COL_MAP)
+    if extra:
+        mapping.update(extra)
+    return df.rename(columns={k: v for k, v in mapping.items() if k in df.columns})
+
 def load_month_data(y: int, m: int) -> pd.DataFrame:
     sql = f"""
-        SELECT id as "ID", fecha as "Fecha", asesor as "Asesor", tecnico as "Tecnico",
-               zona as "Zona", sn_eliminada as "SN_Eliminada", sn_agregada as "SN_Agregada",
-               motivo as "Motivo", cod_cliente as "Cod_Cliente", nombre_cliente as "Nombre_Cliente",
-               orden_trabajo as "Orden_Trabajo", descripcion as "Descripcion"
+        SELECT id, fecha, asesor, tecnico, zona,
+               sn_eliminada, sn_agregada, motivo,
+               cod_cliente, nombre_cliente, orden_trabajo, descripcion
         FROM registros_ont
         WHERE EXTRACT(YEAR  FROM fecha) = {int(y)}
           AND EXTRACT(MONTH FROM fecha) = {int(m)}
           AND eliminado = FALSE
         ORDER BY timestamp DESC
     """
-    return conn.query(sql, ttl=0)
+    try:
+        df = conn.query(sql, ttl=0)
+        if df.empty:
+            return df
+        return _rename_cols(df)
+    except Exception as e:
+        st.error(f"Error cargando datos del mes: {e}")
+        return pd.DataFrame()
 
 def load_year_data(y: int) -> pd.DataFrame:
     sql = f"""
-        SELECT id as "ID", fecha as "Fecha", asesor as "Asesor", tecnico as "Tecnico",
-               zona as "Zona", sn_eliminada as "SN_Eliminada", sn_agregada as "SN_Agregada",
-               motivo as "Motivo", cod_cliente as "Cod_Cliente", nombre_cliente as "Nombre_Cliente",
-               orden_trabajo as "Orden_Trabajo", descripcion as "Descripcion",
-               EXTRACT(MONTH FROM fecha) as "_mes"
+        SELECT id, fecha, asesor, tecnico, zona,
+               sn_eliminada, sn_agregada, motivo,
+               cod_cliente, nombre_cliente, orden_trabajo, descripcion,
+               EXTRACT(MONTH FROM fecha) AS mes_num
         FROM registros_ont
         WHERE EXTRACT(YEAR FROM fecha) = {int(y)}
           AND eliminado = FALSE
         ORDER BY timestamp DESC
     """
-    return conn.query(sql, ttl=0)
+    try:
+        df = conn.query(sql, ttl=0)
+        if df.empty:
+            return df
+        # FIX: renombrar columna auxiliar mes_num (antes _mes con comillas)
+        df = _rename_cols(df, {'mes_num': '_mes'})
+        return df
+    except Exception as e:
+        st.error(f"Error cargando datos del año: {e}")
+        return pd.DataFrame()
 
 def append_ont_record(record: dict) -> bool:
     sql = text("""
@@ -400,9 +456,9 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
 
     pzt = pd.DataFrame()
     if 'Zona' in df.columns and 'Motivo' in df.columns:
-        df2          = df.copy()
-        df2['Tipo']  = df2['Motivo'].map(lambda x: tipo_map.get(x, 'neutral').capitalize())
-        pzt          = df2.groupby(['Zona', 'Tipo']).size().reset_index(name='N')
+        df2         = df.copy()
+        df2['Tipo'] = df2['Motivo'].map(lambda x: tipo_map.get(x, 'neutral').capitalize())
+        pzt         = df2.groupby(['Zona', 'Tipo']).size().reset_index(name='N')
 
     return {
         'total': total, 'pos': pos, 'neg': neg, 'neu': neu, 'balance': pos - neg,
@@ -540,9 +596,6 @@ with tabs[t_idx]:
 
         with col_z2:
             if not kpi['por_zona_tipo'].empty:
-                # BUG FIX #6: El color_discrete_map usaba claves capitalizadas
-                # ('Positive','Negative','Neutral') que coinciden con el .capitalize()
-                # aplicado en calc_metrics — se verifica que sean consistentes.
                 fig_zt = px.bar(
                     kpi['por_zona_tipo'], x='Zona', y='N', color='Tipo',
                     barmode='stack', text_auto=True,
@@ -685,8 +738,7 @@ with tabs[t_idx]:
         if not df_year.empty:
             annual_rows = []
             for mi in range(1, 13):
-                # BUG FIX #7: Antes comparaba df_year['_mes'] == mi pero la columna
-                # EXTRACT devuelve float en algunos drivers (ej. 1.0 en vez de 1).
+                # FIX: EXTRACT devuelve float en algunos drivers (1.0 en vez de 1).
                 # Se convierte a int para la comparación.
                 if '_mes' in df_year.columns:
                     df_mi = df_year[df_year['_mes'].astype(float).astype(int) == mi]
@@ -733,12 +785,14 @@ if role in ('admin', 'auditor'):
         mots_l  = get_motivos_list()
         today   = datetime.now(SV_TZ).date()
 
-        # BUG FIX #8: Si los catálogos están vacíos los selectbox fallan.
-        # Se muestra advertencia en lugar de crash.
         if not zonas_l or not tecs_l or not mots_l:
             st.warning("⚠️ Faltan catálogos (zonas, técnicos o motivos). "
                        "Ve a ⚙️ Configuración y agrégalos primero.")
         else:
+            # FIX: recalcular tipo_map aquí para que esté disponible
+            # incluso si el usuario navega directo a esta pestaña
+            _tipo_map_reg = get_tipo_map()
+
             with st.container(border=True):
                 st.info(
                     f"👤 **Asesor registrado automáticamente:** `{st.session_state.username}`  "
@@ -750,7 +804,7 @@ if role in ('admin', 'auditor'):
                 zona   = cc2.selectbox("🗺️ Zona *",                          zonas_l, key=f"zon_{fk}")
                 motivo = st.selectbox("📋 Motivo / Tipo de Operación *",     mots_l,  key=f"mot_{fk}")
 
-                tipo_sel = tipo_map.get(motivo, 'neutral')
+                tipo_sel = _tipo_map_reg.get(motivo, 'neutral')
                 if   tipo_sel == 'positive': st.success(f"✅ {TIPO_LABEL['positive']}")
                 elif tipo_sel == 'negative': st.warning(f"⚠️ {TIPO_LABEL['negative']}")
                 else:                        st.info(f"🔄 {TIPO_LABEL['neutral']}")
@@ -856,12 +910,15 @@ if role in ('admin', 'auditor'):
                             st.rerun()
 
         st.divider()
+        # FIX: Verificar que df_hist no esté vacío antes de ofrecer descarga
+        csv_data = df_hist.to_csv(index=False).encode('utf-8') if not df_hist.empty else b""
         st.download_button(
             "📥 Descargar CSV",
-            df_hist.to_csv(index=False).encode('utf-8'),
+            csv_data,
             f"ONT_{mes_sel}_{anio}.csv",
             "text/csv",
             use_container_width=True,
+            disabled=df_hist.empty,
         )
 
     t_idx += 1
@@ -1042,6 +1099,10 @@ if role == 'admin' and len(tabs) > t_idx:
             with u_col2:
                 df_u_all = _get_users_raw()
                 if not df_u_all.empty:
+                    # FIX: normalizar nombres de columna a minúsculas para
+                    # evitar KeyError si el driver retorna en otro case
+                    df_u_all.columns = [c.lower() for c in df_u_all.columns]
+
                     df_sa = df_u_all[df_u_all['username'] == SUPERADMIN]
                     df_ot = df_u_all[df_u_all['username'] != SUPERADMIN].reset_index(drop=True)
 
