@@ -1,7 +1,3 @@
-# =====================================================================
-# ONT MANAGER — ISP NOC  |  Backend: Google Sheets  |  Streamlit
-# Usuario inicial: Admin / Admin2024@  (cámbialo al primer login)
-# =====================================================================
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -191,7 +187,7 @@ def init_system():
 
     # ── Usuarios ──
     if SH_USUARIOS not in existing:
-        ws_u = ss.add_worksheet(SH_USUARIOS, rows=500, cols=10)
+        ws_u = ss.add_worksheet(title=SH_USUARIOS, rows=500, cols=10)
         ws_u.append_row(USER_COLS)
         ws_u.append_row([SUPERADMIN, _hash(SUPERADMIN_PW), 'admin', 0, '', 'FALSE', ''])
     else:
@@ -202,21 +198,21 @@ def init_system():
 
     # ── Zonas ──
     if SH_ZONAS not in existing:
-        ws_z = ss.add_worksheet(SH_ZONAS, rows=200, cols=2)
+        ws_z = ss.add_worksheet(title=SH_ZONAS, rows=200, cols=2)
         ws_z.append_row(['Zona'])
         for z in DEFAULT_ZONAS:
             ws_z.append_row([z])
 
     # ── Técnicos ──
     if SH_TECNICOS not in existing:
-        ws_t = ss.add_worksheet(SH_TECNICOS, rows=200, cols=2)
+        ws_t = ss.add_worksheet(title=SH_TECNICOS, rows=200, cols=2)
         ws_t.append_row(['Tecnico'])
         for t in DEFAULT_TECNICOS:
             ws_t.append_row([t])
 
     # ── Motivos ──
     if SH_MOTIVOS not in existing:
-        ws_m = ss.add_worksheet(SH_MOTIVOS, rows=200, cols=2)
+        ws_m = ss.add_worksheet(title=SH_MOTIVOS, rows=200, cols=2)
         ws_m.append_row(['Motivo', 'Tipo'])
         for mot, tipo in DEFAULT_MOTIVOS:
             ws_m.append_row([mot, tipo])
@@ -224,7 +220,8 @@ def init_system():
 try:
     init_system()
 except Exception as _ei:
-    st.error(f"⚠️ Error inicializando el sistema: {_ei}")
+    st.error(f"⚠️ Error inicializando el sistema.\n\nDetalles del error interno: `{repr(_ei)}`\n\n**Solución Manual Requerida en Google Sheets:**\n1. Ve a tu archivo de Google Sheets.\n2. Presiona el botón de **Compartir**.\n3. Agrega el correo electrónico de tu Service Account (el que termina en `gserviceaccount.com`).\n4. Asígnale permisos de **Editor**.\n5. Asegúrate de que el `spreadsheet_id` de tu archivo coincida con el configurado en tus Secrets.")
+    st.stop()
 
 # ─────────────────────────────────────────────────────────────────────
 # 7. CATÁLOGOS (cacheados)
@@ -350,8 +347,14 @@ def do_login():
             'failed_attempts': 0, 'locked_until': '', 'session_token': token
         })
         _get_db_token.clear()
+        
+        # Asignar rol. Por defecto, si no tiene rol explícito se asigna como 'auditor'
+        role_db = str(user.get('role', 'auditor')).lower()
+        if role_db not in ['admin', 'auditor']:
+            role_db = 'auditor' # Fallback para asegurar solo 2 roles
+            
         st.session_state.update({
-            'logged_in': True, 'role': str(user.get('role', 'viewer')),
+            'logged_in': True, 'role': role_db,
             'username': u, 'log_err': '', 'session_token': token,
         })
     else:
@@ -570,9 +573,11 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────
 role = st.session_state.role
 
-if   role == 'admin':   _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial","⚙️ Configuración"]
-elif role == 'auditor': _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial"]
-else:                   _tabs = ["📊 Dashboard"]
+# Roles definidos: admin y auditor. Auditor es el default.
+if role == 'admin':
+    _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial","⚙️ Configuración"]
+else:
+    _tabs = ["📊 Dashboard","📝 Registrar","🗂️ Historial"]
 
 tabs  = st.tabs(_tabs)
 t_idx = 0
@@ -1105,11 +1110,10 @@ if role == 'admin' and len(tabs) > t_idx:
                     st.markdown("**Crear Nuevo Usuario**")
                     nu_u = st.text_input("Nombre de usuario")
                     nu_p = st.text_input("Contraseña", type="password")
-                    nu_r = st.selectbox("Rol", ['viewer', 'auditor', 'admin'],
+                    nu_r = st.selectbox("Rol", ['auditor', 'admin'],
                                         format_func=lambda x: {
-                                            'viewer':  '👁️ Solo Vista',
-                                            'auditor': '📝 Auditor (Puede registrar)',
-                                            'admin':   '⚙️ Administrador',
+                                            'auditor': '📝 Auditor (Puede registrar y ver)',
+                                            'admin':   '⚙️ Administrador (Acceso total)',
                                         }[x])
                     if st.form_submit_button("✅ Crear Usuario") and nu_u and nu_p:
                         err_p = _validate_pw(nu_p)
@@ -1168,7 +1172,7 @@ if role == 'admin' and len(tabs) > t_idx:
                         for _, ur in df_ot.iterrows():
                             uc1, uc2, uc3, uc4, uc5 = st.columns([2, 1, 1, 1, 1])
                             uc1.markdown(f"**{ur['username']}**")
-                            uc2.caption(ur.get('role', 'viewer'))
+                            uc2.caption(ur.get('role', 'auditor'))
                             is_banned_u = str(ur.get('is_banned', 'FALSE')).upper() == 'TRUE'
                             fa_u        = int(ur.get('failed_attempts', 0) or 0)
                             uc3.caption(f"{'🚫 Baneado' if is_banned_u else '✅ Activo'}")
