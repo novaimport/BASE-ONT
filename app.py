@@ -269,33 +269,33 @@ if _local_tok:
 # 8. DATA FUNCTIONS (PostgreSQL)
 # ─────────────────────────────────────────────────────────────────────
 def load_month_data(y: int, m: int) -> pd.DataFrame:
-    sql = """
+    sql = f"""
         SELECT id as "ID", fecha as "Fecha", asesor as "Asesor", tecnico as "Tecnico", 
                zona as "Zona", sn_eliminada as "SN_Eliminada", sn_agregada as "SN_Agregada", 
                motivo as "Motivo", cod_cliente as "Cod_Cliente", nombre_cliente as "Nombre_Cliente", 
                orden_trabajo as "Orden_Trabajo", descripcion as "Descripcion"
         FROM registros_ont 
-        WHERE EXTRACT(YEAR FROM fecha) = :y 
-          AND EXTRACT(MONTH FROM fecha) = :m 
+        WHERE EXTRACT(YEAR FROM fecha) = {y} 
+          AND EXTRACT(MONTH FROM fecha) = {m} 
           AND eliminado = FALSE
         ORDER BY timestamp DESC
     """
-    df = conn.query(sql, params={"y": y, "m": m}, ttl=0)
+    df = conn.query(sql, ttl=0)
     return df
 
 def load_year_data(y: int) -> pd.DataFrame:
-    sql = """
+    sql = f"""
         SELECT id as "ID", fecha as "Fecha", asesor as "Asesor", tecnico as "Tecnico", 
                zona as "Zona", sn_eliminada as "SN_Eliminada", sn_agregada as "SN_Agregada", 
                motivo as "Motivo", cod_cliente as "Cod_Cliente", nombre_cliente as "Nombre_Cliente", 
                orden_trabajo as "Orden_Trabajo", descripcion as "Descripcion",
                EXTRACT(MONTH FROM fecha) as "_mes"
         FROM registros_ont 
-        WHERE EXTRACT(YEAR FROM fecha) = :y 
+        WHERE EXTRACT(YEAR FROM fecha) = {y} 
           AND eliminado = FALSE
         ORDER BY timestamp DESC
     """
-    df = conn.query(sql, params={"y": y}, ttl=0)
+    df = conn.query(sql, ttl=0)
     return df
 
 def append_ont_record(record: dict) -> bool:
