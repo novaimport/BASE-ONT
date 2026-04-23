@@ -146,7 +146,7 @@ def _get_users_raw() -> pd.DataFrame:
     return conn.query("SELECT username, role, is_banned, failed_attempts FROM usuarios ORDER BY username ASC", ttl=5)
 
 def _find_user(username: str):
-    df = conn.query("SELECT * FROM usuarios WHERE username = :u", params={"u": username}, ttl=0)
+    df = conn.query("SELECT * FROM usuarios WHERE username = %(u)s", params={"u": username}, ttl=0)
     if not df.empty:
         return df.iloc[0].to_dict()
     return None
