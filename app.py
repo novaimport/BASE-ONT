@@ -133,13 +133,36 @@ _SCOPES = [
 
 @st.cache_resource
 def _gc():
-    creds = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]), scopes=_SCOPES)
+    import json
+    if "gcp_service_account" not in st.secrets:
+        raise ValueError("Falta la llave 'gcp_service_account' en el archivo secrets.toml")
+    
+    sec = st.secrets["gcp_service_account"]
+    
+    # Si se pegó el JSON entero como un string:
+    if isinstance(sec, str):
+        try:
+            creds_dict = json.loads(sec)
+        except Exception as e:
+            raise ValueError(f"El formato JSON en secrets.toml es inválido: {e}")
+    else:
+        # Si se pegó usando el formato nativo de TOML:
+        creds_dict = dict(sec)
+        
+    creds = Credentials.from_service_account_info(creds_dict, scopes=_SCOPES)
     return gspread.authorize(creds)
 
 @st.cache_resource
 def _ss():
-    return _gc().open_by_key(st.secrets["sheets"]["spreadsheet_id"])
+    # Buscamos el ID ya sea dentro de [sheets] o en la raíz del TOML
+    if "sheets" in st.secrets and "spreadsheet_id" in st.secrets["sheets"]:
+        sid = st.secrets["sheets"]["spreadsheet_id"]
+    elif "spreadsheet_id" in st.secrets:
+        sid = st.secrets["spreadsheet_id"]
+    else:
+        raise ValueError("Falta configurar el 'spreadsheet_id' en el archivo secrets.toml")
+        
+    return _gc().open_by_key(sid)
 
 def _ws(name: str) -> gspread.Worksheet:
     return _ss().worksheet(name)
