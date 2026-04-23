@@ -3,7 +3,5 @@ pandas
 plotly
 bcrypt
 pytz
-reportlab
-gspread
-google-auth
-streamlit-autorefresh
+SQLAlchemy
+psycopg2-binary
