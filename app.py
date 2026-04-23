@@ -22,6 +22,8 @@ COLOR_SECONDARY = '#1d2c59'
 COLOR_TEAL      = '#29b09d'
 COLOR_DANGER    = '#ff2b2b'
 COLOR_WARN      = '#ff9f43'
+COLOR_NEW       = '#83c9ff'
+COLOR_REC       = '#a29bfe'
 
 MESES = ("Enero","Febrero","Marzo","Abril","Mayo","Junio",
          "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre")
@@ -35,6 +37,8 @@ TIPO_LABEL = {
 }
 TIPO_COLOR = {'positive': COLOR_TEAL, 'negative': COLOR_DANGER, 'neutral': COLOR_WARN}
 TIPO_EMOJI = {'positive': '🟢', 'negative': '🔴', 'neutral': '🟡'}
+
+ESTADO_EQUIPO_OPS = ["No Aplica", "Nuevo", "Recuperado"]
 
 # ─────────────────────────────────────────────────────────────────────
 # 2. CSS
@@ -116,16 +120,12 @@ def _validate_pw(p: str):
 
 # ─────────────────────────────────────────────────────────────────────
 # 5. CATÁLOGOS (vía BD)
-# FIX: Eliminados alias con comillas dobles escapadas que causan
-#      pandas.errors.DatabaseError en SQLAlchemy moderno / Python 3.14.
-#      Ahora se seleccionan columnas sin alias y se renombran en Python.
 # ─────────────────────────────────────────────────────────────────────
 def get_zonas() -> list:
     try:
         df = conn.query("SELECT nombre FROM zonas ORDER BY nombre ASC", ttl=10)
         if df.empty:
             return []
-        # El driver puede devolver 'nombre' en minúsculas
         col = df.columns[0]
         return df[col].tolist()
     except Exception as e:
@@ -148,7 +148,6 @@ def get_motivos_df() -> pd.DataFrame:
         df = conn.query("SELECT motivo, tipo FROM motivos ORDER BY motivo ASC", ttl=10)
         if df.empty:
             return pd.DataFrame(columns=['Motivo', 'Tipo'])
-        # Normalizar nombres de columna (pueden venir en minúsculas)
         df.columns = [c.lower() for c in df.columns]
         return df.rename(columns={'motivo': 'Motivo', 'tipo': 'Tipo'})
     except Exception as e:
@@ -324,27 +323,24 @@ if _local_tok:
 
 # ─────────────────────────────────────────────────────────────────────
 # 8. DATA FUNCTIONS (PostgreSQL)
-# FIX: Eliminados alias con comillas dobles escapadas. Se usan nombres
-#      de columna en minúsculas y se renombran con df.rename() después
-#      de la consulta para mantener compatibilidad con el resto del código.
 # ─────────────────────────────────────────────────────────────────────
 _COL_MAP = {
-    'id':             'ID',
-    'fecha':          'Fecha',
-    'asesor':         'Asesor',
-    'tecnico':        'Tecnico',
-    'zona':           'Zona',
-    'sn_eliminada':   'SN_Eliminada',
-    'sn_agregada':    'SN_Agregada',
-    'motivo':         'Motivo',
-    'cod_cliente':    'Cod_Cliente',
-    'nombre_cliente': 'Nombre_Cliente',
-    'orden_trabajo':  'Orden_Trabajo',
-    'descripcion':    'Descripcion',
+    'id':                 'ID',
+    'fecha':              'Fecha',
+    'asesor':             'Asesor',
+    'tecnico':            'Tecnico',
+    'zona':               'Zona',
+    'sn_eliminada':       'SN_Eliminada',
+    'sn_agregada':        'SN_Agregada',
+    'motivo':             'Motivo',
+    'cod_cliente':        'Cod_Cliente',
+    'nombre_cliente':     'Nombre_Cliente',
+    'orden_trabajo':      'Orden_Trabajo',
+    'descripcion':        'Descripcion',
+    'equipo_recuperado':  'Equipo_Recuperado',
 }
 
 def _rename_cols(df: pd.DataFrame, extra: dict = None) -> pd.DataFrame:
-    """Normaliza nombres de columna a minúsculas y aplica el mapa estándar."""
     df.columns = [c.lower() for c in df.columns]
     mapping = dict(_COL_MAP)
     if extra:
@@ -355,7 +351,8 @@ def load_month_data(y: int, m: int) -> pd.DataFrame:
     sql = f"""
         SELECT id, fecha, asesor, tecnico, zona,
                sn_eliminada, sn_agregada, motivo,
-               cod_cliente, nombre_cliente, orden_trabajo, descripcion
+               cod_cliente, nombre_cliente, orden_trabajo, descripcion,
+               equipo_recuperado
         FROM registros_ont
         WHERE EXTRACT(YEAR  FROM fecha) = {int(y)}
           AND EXTRACT(MONTH FROM fecha) = {int(m)}
@@ -376,6 +373,7 @@ def load_year_data(y: int) -> pd.DataFrame:
         SELECT id, fecha, asesor, tecnico, zona,
                sn_eliminada, sn_agregada, motivo,
                cod_cliente, nombre_cliente, orden_trabajo, descripcion,
+               equipo_recuperado,
                EXTRACT(MONTH FROM fecha) AS mes_num
         FROM registros_ont
         WHERE EXTRACT(YEAR FROM fecha) = {int(y)}
@@ -386,7 +384,6 @@ def load_year_data(y: int) -> pd.DataFrame:
         df = conn.query(sql, ttl=0)
         if df.empty:
             return df
-        # FIX: renombrar columna auxiliar mes_num (antes _mes con comillas)
         df = _rename_cols(df, {'mes_num': '_mes'})
         return df
     except Exception as e:
@@ -397,8 +394,9 @@ def append_ont_record(record: dict) -> bool:
     sql = text("""
         INSERT INTO registros_ont
         (fecha, asesor, tecnico, zona, sn_eliminada, sn_agregada,
-         motivo, cod_cliente, nombre_cliente, orden_trabajo, descripcion)
-        VALUES (:f, :a, :t, :z, :sne, :sna, :m, :cc, :nc, :ot, :d)
+         motivo, cod_cliente, nombre_cliente, orden_trabajo, descripcion,
+         equipo_recuperado)
+        VALUES (:f, :a, :t, :z, :sne, :sna, :m, :cc, :nc, :ot, :d, :er)
     """)
     params = {
         "f":   record.get('Fecha'),
@@ -412,6 +410,7 @@ def append_ont_record(record: dict) -> bool:
         "nc":  record.get('Nombre_Cliente'),
         "ot":  record.get('Orden_Trabajo'),
         "d":   record.get('Descripcion', ''),
+        "er":  record.get('Equipo_Recuperado'),   # None | True | False
     }
     try:
         with conn.session as s:
@@ -440,6 +439,12 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
         'total': 0, 'pos': 0, 'neg': 0, 'neu': 0, 'balance': 0,
         'por_motivo': {}, 'por_zona': {}, 'por_tecnico': {}, 'por_asesor': {},
         'por_zona_tipo': pd.DataFrame(),
+        'por_zona_motivo': pd.DataFrame(),
+        'balance_por_zona': pd.DataFrame(),
+        'recuperados_total': 0,
+        'nuevos_total': 0,
+        'no_aplica_total': 0,
+        'recuperados_por_zona': pd.DataFrame(),
     }
     if df is None or df.empty:
         return base
@@ -454,16 +459,58 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
     neg = sum(v for k, v in pm.items() if tipo_map.get(k, 'neutral') == 'negative')
     neu = total - pos - neg
 
+    # ── Acciones por tipo por zona (stacked) ──
     pzt = pd.DataFrame()
     if 'Zona' in df.columns and 'Motivo' in df.columns:
         df2         = df.copy()
         df2['Tipo'] = df2['Motivo'].map(lambda x: tipo_map.get(x, 'neutral').capitalize())
         pzt         = df2.groupby(['Zona', 'Tipo']).size().reset_index(name='N')
 
+    # ── Acciones por motivo por zona (para gráfica detallada) ──
+    pzm = pd.DataFrame()
+    if 'Zona' in df.columns and 'Motivo' in df.columns:
+        pzm = df.groupby(['Zona', 'Motivo']).size().reset_index(name='N')
+
+    # ── Balance neto por zona (positivos - negativos) ──
+    bpz = pd.DataFrame()
+    if 'Zona' in df.columns and 'Motivo' in df.columns:
+        df3          = df.copy()
+        df3['Tipo']  = df3['Motivo'].map(lambda x: tipo_map.get(x, 'neutral'))
+        pos_z        = df3[df3['Tipo'] == 'positive'].groupby('Zona').size().rename('Positivos')
+        neg_z        = df3[df3['Tipo'] == 'negative'].groupby('Zona').size().rename('Negativos')
+        bpz          = pd.concat([pos_z, neg_z], axis=1).fillna(0).reset_index()
+        bpz['Balance'] = bpz['Positivos'] - bpz['Negativos']
+        bpz[['Positivos', 'Negativos', 'Balance']] = bpz[['Positivos', 'Negativos', 'Balance']].astype(int)
+
+    # ── Equipos recuperados / nuevos ──
+    rec_total  = 0
+    new_total  = 0
+    nap_total  = 0
+    rec_zona   = pd.DataFrame()
+
+    if 'Equipo_Recuperado' in df.columns:
+        rec_total = int(df['Equipo_Recuperado'].eq(True).sum())
+        new_total = int(df['Equipo_Recuperado'].eq(False).sum())
+        nap_total = int(df['Equipo_Recuperado'].isna().sum())
+
+        if 'Zona' in df.columns:
+            df4 = df.copy()
+            df4['Estado'] = df4['Equipo_Recuperado'].apply(
+                lambda x: 'Recuperado' if x is True or x == True
+                else ('Nuevo' if x is False or x == False else 'No Aplica')
+            )
+            rec_zona = df4.groupby(['Zona', 'Estado']).size().reset_index(name='N')
+
     return {
         'total': total, 'pos': pos, 'neg': neg, 'neu': neu, 'balance': pos - neg,
         'por_motivo': pm, 'por_zona': pz, 'por_tecnico': pt, 'por_asesor': pa,
         'por_zona_tipo': pzt,
+        'por_zona_motivo': pzm,
+        'balance_por_zona': bpz,
+        'recuperados_total': rec_total,
+        'nuevos_total': new_total,
+        'no_aplica_total': nap_total,
+        'recuperados_por_zona': rec_zona,
     }
 
 def _delta_str(cur, prv) -> str:
@@ -481,7 +528,7 @@ def _delta_color(cur, prv, tipo: str) -> str:
 with st.sidebar:
     st.caption(
         f"👤 **{st.session_state.username}** "
-        f"({st.session_state.role.capitalize()})  |  ONT Manager v3.0 (Neon)"
+        f"({st.session_state.role.capitalize()})  |  ONT Manager v3.1 (Neon)"
     )
     st.divider()
 
@@ -524,251 +571,290 @@ with tabs[t_idx]:
     st.title(f"📊 Dashboard ONT — {mes_sel} {anio}")
 
     tipo_map = get_tipo_map()
+    df_cur   = load_month_data(anio, m_idx)
+    kpi      = calc_metrics(df_cur, tipo_map)
 
-    df_cur  = load_month_data(anio, m_idx)
-    pm_anio = anio - 1 if m_idx == 1 else anio
-    pm_mes  = 12      if m_idx == 1 else m_idx - 1
-    df_prev = load_month_data(pm_anio, pm_mes)
-
-    kpi  = calc_metrics(df_cur,  tipo_map)
-    kpip = calc_metrics(df_prev, tipo_map)
-
-    st.markdown("### 📈 Resumen del Mes")
-    st.caption(f"*Variación vs {MESES[pm_mes - 1]} {pm_anio}*")
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("📦 Total Operaciones",
-              kpi['total'],   _delta_str(kpi['total'],   kpip['total']),   delta_color='normal')
-    c2.metric("✅ Positivas (Inst./Reconex.)",
-              kpi['pos'],     _delta_str(kpi['pos'],     kpip['pos']),     delta_color=_delta_color(kpi['pos'],     kpip['pos'],     'positive'))
-    c3.metric("⚠️ Negativas (Prob./Descon.)",
-              kpi['neg'],     _delta_str(kpi['neg'],     kpip['neg']),     delta_color=_delta_color(kpi['neg'],     kpip['neg'],     'negative'))
-    c4.metric("🔄 Neutrales (Cambios)",
-              kpi['neu'],     _delta_str(kpi['neu'],     kpip['neu']),     delta_color='normal')
-    c5.metric("⚖️ Balance Neto (+ vs −)",
-              kpi['balance'], _delta_str(kpi['balance'], kpip['balance']), delta_color=_delta_color(kpi['balance'], kpip['balance'], 'positive'))
+    # ─────────────────────────────────────────────────────────────
+    # KPI 1 — Cantidad total de acciones realizadas en general
+    # ─────────────────────────────────────────────────────────────
+    st.markdown("### 1️⃣ Acciones Realizadas en General")
 
     if df_cur.empty:
         st.info("ℹ️ No hay registros para este mes. Comienza registrando un movimiento.")
-    else:
-        st.divider()
-        st.markdown("### 📋 Desglose por Motivo")
-        col_mot, col_pie = st.columns(2)
+        st.stop()
 
-        with col_mot:
-            pm_df = (pd.DataFrame(list(kpi['por_motivo'].items()), columns=['Motivo', 'Cantidad'])
-                     .sort_values('Cantidad', ascending=True))
-            pm_df['Color'] = pm_df['Motivo'].map(
-                lambda x: TIPO_COLOR.get(tipo_map.get(x, 'neutral'), COLOR_WARN))
-            fig_mot = px.bar(pm_df, x='Cantidad', y='Motivo', orientation='h',
-                             text_auto=True, title="Operaciones por Motivo")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("📦 Total Acciones",          kpi['total'])
+    c2.metric("✅ Positivas",               kpi['pos'])
+    c3.metric("⚠️ Negativas",              kpi['neg'])
+    c4.metric("🔄 Neutrales",              kpi['neu'])
+    c5.metric("⚖️ Balance Neto",           kpi['balance'],
+              delta_color="normal" if kpi['balance'] >= 0 else "inverse")
+
+    st.divider()
+
+    # ─────────────────────────────────────────────────────────────
+    # KPI 2 — Cantidad de acciones por tipo (motivo)
+    # ─────────────────────────────────────────────────────────────
+    st.markdown("### 2️⃣ Acciones por Tipo de Operación (Motivo)")
+
+    if kpi['por_motivo']:
+        pm_df = (
+            pd.DataFrame(list(kpi['por_motivo'].items()), columns=['Motivo', 'Cantidad'])
+            .sort_values('Cantidad', ascending=True)
+        )
+        pm_df['Tipo']  = pm_df['Motivo'].map(lambda x: tipo_map.get(x, 'neutral'))
+        pm_df['Color'] = pm_df['Tipo'].map(lambda x: TIPO_COLOR.get(x, COLOR_WARN))
+
+        col_bar, col_pie = st.columns(2)
+        with col_bar:
+            fig_mot = px.bar(
+                pm_df, x='Cantidad', y='Motivo', orientation='h',
+                text_auto=True,
+                title="Cantidad de Acciones por Motivo",
+            )
             fig_mot.update_traces(marker_color=pm_df['Color'].tolist())
-            fig_mot.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=370,
-                                  margin=dict(l=0, r=0, t=40, b=0))
+            fig_mot.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)', height=380,
+                margin=dict(l=0, r=0, t=40, b=0),
+            )
             st.plotly_chart(fig_mot, use_container_width=True)
 
         with col_pie:
             pie_df = pd.DataFrame({
                 'Tipo':     ['Positivo', 'Negativo', 'Neutral'],
-                'Cantidad': [kpi['pos'], kpi['neg'],  kpi['neu']],
+                'Cantidad': [kpi['pos'], kpi['neg'], kpi['neu']],
             })
-            fig_pie = px.pie(pie_df, names='Tipo', values='Cantidad', hole=0.5,
-                             color_discrete_sequence=[COLOR_TEAL, COLOR_DANGER, COLOR_WARN],
-                             title="Balance por Tipo")
+            fig_pie = px.pie(
+                pie_df, names='Tipo', values='Cantidad', hole=0.5,
+                color_discrete_sequence=[COLOR_TEAL, COLOR_DANGER, COLOR_WARN],
+                title="Distribución por Tipo",
+            )
             fig_pie.update_traces(textinfo='percent+label', textposition='inside')
-            fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=370,
-                                  showlegend=False)
+            fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=380, showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        st.divider()
-        st.markdown("### 🗺️ Análisis por Zona")
-        col_z1, col_z2 = st.columns(2)
+        # Mini KPIs por motivo
+        motivo_items = sorted(kpi['por_motivo'].items(), key=lambda x: x[1], reverse=True)
+        cols_per_row = 4
+        for i in range(0, len(motivo_items), cols_per_row):
+            row_items = motivo_items[i:i + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for j, (mot, cnt) in enumerate(row_items):
+                tipo_m = tipo_map.get(mot, 'neutral')
+                emoji  = TIPO_EMOJI.get(tipo_m, '⚪')
+                cols[j].metric(f"{emoji} {mot}", cnt)
 
-        with col_z1:
-            z_df = (pd.DataFrame(list(kpi['por_zona'].items()), columns=['Zona', 'Operaciones'])
-                    .sort_values('Operaciones', ascending=False))
-            fig_z = px.bar(z_df, x='Zona', y='Operaciones', text_auto=True,
-                           color='Operaciones', color_continuous_scale='Blues',
-                           title="Total Operaciones por Zona")
-            fig_z.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=360,
-                                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30)
-            st.plotly_chart(fig_z, use_container_width=True)
+    st.divider()
 
-        with col_z2:
-            if not kpi['por_zona_tipo'].empty:
-                fig_zt = px.bar(
-                    kpi['por_zona_tipo'], x='Zona', y='N', color='Tipo',
-                    barmode='stack', text_auto=True,
-                    color_discrete_map={
-                        'Positive': COLOR_TEAL,
-                        'Negative': COLOR_DANGER,
-                        'Neutral':  COLOR_WARN,
-                    },
-                    title="Tipo de Operación por Zona",
-                )
-                fig_zt.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=360,
-                                     margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30)
-                st.plotly_chart(fig_zt, use_container_width=True)
+    # ─────────────────────────────────────────────────────────────
+    # KPI 3 — Cantidad de acciones por zona (general)
+    # ─────────────────────────────────────────────────────────────
+    st.markdown("### 3️⃣ Acciones por Zona (General)")
 
-        st.divider()
-        col_tec, col_as = st.columns(2)
+    if kpi['por_zona']:
+        z_df = (
+            pd.DataFrame(list(kpi['por_zona'].items()), columns=['Zona', 'Operaciones'])
+            .sort_values('Operaciones', ascending=False)
+        )
+        fig_z = px.bar(
+            z_df, x='Zona', y='Operaciones', text_auto=True,
+            color='Operaciones',
+            color_continuous_scale=[[0, '#1d2c59'], [0.5, COLOR_PRIMARY], [1, COLOR_TEAL]],
+            title=f"Total de Acciones por Zona — {mes_sel} {anio}",
+        )
+        fig_z.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', height=380,
+            margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+        )
+        st.plotly_chart(fig_z, use_container_width=True)
 
-        with col_tec:
-            if kpi['por_tecnico']:
-                tec_df = (pd.DataFrame(list(kpi['por_tecnico'].items()),
-                                       columns=['Técnico', 'Operaciones'])
-                          .sort_values('Operaciones', ascending=True))
-                fig_tec = px.bar(tec_df, x='Operaciones', y='Técnico', orientation='h',
-                                 text_auto=True,
-                                 color_discrete_sequence=[COLOR_PRIMARY],
-                                 title="🔧 Operaciones por Técnico de Campo")
-                fig_tec.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=340,
-                                      margin=dict(l=0, r=0, t=40, b=0))
-                st.plotly_chart(fig_tec, use_container_width=True)
+        # Mini KPIs por zona
+        zona_items = sorted(kpi['por_zona'].items(), key=lambda x: x[1], reverse=True)
+        cols_per_row = 4
+        for i in range(0, len(zona_items), cols_per_row):
+            row_items = zona_items[i:i + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for j, (zona, cnt) in enumerate(row_items):
+                cols[j].metric(f"🗺️ {zona}", cnt)
 
-        with col_as:
-            if kpi['por_asesor']:
-                as_df = (pd.DataFrame(list(kpi['por_asesor'].items()),
-                                      columns=['Asesor', 'Registros'])
-                         .sort_values('Registros', ascending=True))
-                fig_as = px.bar(as_df, x='Registros', y='Asesor', orientation='h',
-                                text_auto=True,
-                                color_discrete_sequence=[COLOR_TEAL],
-                                title="👤 Registros por Asesor")
-                fig_as.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=340,
-                                     margin=dict(l=0, r=0, t=40, b=0))
-                st.plotly_chart(fig_as, use_container_width=True)
+    st.divider()
 
-        st.divider()
-        st.markdown("### ⚖️ Balance: Instalaciones & Reconexiones vs Desconexiones")
-        b_col1, b_col2, b_col3 = st.columns(3)
+    # ─────────────────────────────────────────────────────────────
+    # KPI 4 — Acciones por tipo (motivo) por zona
+    # ─────────────────────────────────────────────────────────────
+    st.markdown("### 4️⃣ Acciones por Tipo de Operación · Por Zona")
 
-        inst_rc = (kpi['por_motivo'].get('Instalacion Nueva', 0)
-                   + kpi['por_motivo'].get('Reconexion', 0))
-        descon  = kpi['por_motivo'].get('Desconexion', 0)
-        neto    = inst_rc - descon
+    col4a, col4b = st.columns(2)
 
-        b_col1.metric("📥 Inst. + Reconexiones", inst_rc)
-        b_col2.metric("📤 Desconexiones",         descon)
-        b_col3.metric("⚖️ Neto de Clientes",      neto,
-                      f"{'▲' if neto >= 0 else '▼'} {abs(neto)}",
-                      delta_color="normal" if neto >= 0 else "inverse")
-
-        st.divider()
-        st.markdown("### 📅 Comparación entre Meses")
-
-        with st.expander("🔍 Configurar comparación", expanded=True):
-            cc1, cc2 = st.columns([3, 1])
-            meses_sel = cc1.multiselect(
-                "Selecciona los meses a comparar",
-                options=list(MESES),
-                default=[MESES[pm_mes - 1], mes_sel],
-                max_selections=6,
-            )
-            anio_comp = cc2.selectbox("Año", [anio, anio - 1], key="anio_comp")
-
-        if len(meses_sel) >= 2:
-            comp_rows = []
-            for mc in meses_sel:
-                mi  = MESES.index(mc) + 1
-                dfc = load_month_data(anio_comp, mi)
-                km  = calc_metrics(dfc, tipo_map)
-                comp_rows.append({
-                    'Mes':       mc,
-                    'Total':     km['total'],
-                    'Positivos': km['pos'],
-                    'Negativos': km['neg'],
-                    'Neutrales': km['neu'],
-                    'Balance':   km['balance'],
-                })
-            df_comp = pd.DataFrame(comp_rows)
-
-            fig_comp = px.bar(
-                df_comp.melt(id_vars='Mes',
-                             value_vars=['Positivos', 'Negativos', 'Neutrales']),
-                x='Mes', y='value', color='variable', barmode='group',
-                text_auto=True,
+    # Gráfica apilada por tipo (Positivo / Negativo / Neutral) por zona
+    with col4a:
+        if not kpi['por_zona_tipo'].empty:
+            fig_zt = px.bar(
+                kpi['por_zona_tipo'], x='Zona', y='N', color='Tipo',
+                barmode='stack', text_auto=True,
                 color_discrete_map={
-                    'Positivos': COLOR_TEAL,
-                    'Negativos': COLOR_DANGER,
-                    'Neutrales': COLOR_WARN,
+                    'Positive': COLOR_TEAL,
+                    'Negative': COLOR_DANGER,
+                    'Neutral':  COLOR_WARN,
                 },
-                category_orders={'Mes': meses_sel},
-                title=f"Comparativo Mensual — {anio_comp}",
+                title="Tipo de Operación por Zona (apilado)",
             )
-            fig_comp.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=400,
-                                   margin=dict(l=0, r=0, t=40, b=0))
-            st.plotly_chart(fig_comp, use_container_width=True)
+            fig_zt.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)', height=400,
+                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+            )
+            st.plotly_chart(fig_zt, use_container_width=True)
 
-            st.markdown("**📉📈 Variación entre meses consecutivos seleccionados:**")
-            for i in range(1, len(comp_rows)):
-                cur_c = comp_rows[i]
-                prv_c = comp_rows[i - 1]
+    # Gráfica agrupada por motivo específico por zona
+    with col4b:
+        if not kpi['por_zona_motivo'].empty:
+            fig_zm = px.bar(
+                kpi['por_zona_motivo'], x='Zona', y='N', color='Motivo',
+                barmode='group', text_auto=True,
+                title="Motivo Específico por Zona (agrupado)",
+            )
+            fig_zm.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)', height=400,
+                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+            )
+            st.plotly_chart(fig_zm, use_container_width=True)
 
-                def _cell(label, cur_v, prv_v, tipo):
-                    d   = cur_v - prv_v
-                    sig = '+' if d >= 0 else ''
-                    if   tipo == 'positive': clr = COLOR_TEAL  if d >= 0 else COLOR_DANGER
-                    elif tipo == 'negative': clr = COLOR_TEAL  if d <= 0 else COLOR_DANGER
-                    else:                    clr = COLOR_WARN
-                    return (f"<div style='text-align:center'><b style='font-size:12px;"
-                            f"color:#a5a8b5'>{label}</b><br>"
-                            f"<span style='color:{clr};font-size:22px;font-weight:800'>"
-                            f"{cur_v}</span><br>"
-                            f"<span style='color:{clr};font-size:13px'>({sig}{d})</span></div>")
+    st.divider()
 
-                rc1, rc2, rc3, rc4, rc5 = st.columns(5)
-                rc1.markdown(
-                    f"<div style='padding-top:14px;font-weight:700;"
-                    f"color:#a5a8b5;font-size:13px'>"
-                    f"📆 {cur_c['Mes']}<br><span style='color:#555'>vs {prv_c['Mes']}</span></div>",
-                    unsafe_allow_html=True,
+    # ─────────────────────────────────────────────────────────────
+    # KPI 5 — Balance por zona según cada acción
+    # ─────────────────────────────────────────────────────────────
+    st.markdown("### 5️⃣ Balance por Zona")
+
+    if not kpi['balance_por_zona'].empty:
+        bpz = kpi['balance_por_zona']
+
+        col5a, col5b = st.columns(2)
+
+        with col5a:
+            # Balance neto por zona
+            colors_balance = [COLOR_TEAL if b >= 0 else COLOR_DANGER for b in bpz['Balance']]
+            fig_bal = go.Figure()
+            fig_bal.add_trace(go.Bar(
+                x=bpz['Zona'],
+                y=bpz['Balance'],
+                text=bpz['Balance'],
+                textposition='outside',
+                marker_color=colors_balance,
+                name='Balance Neto',
+            ))
+            fig_bal.update_layout(
+                title="Balance Neto por Zona (Positivos − Negativos)",
+                paper_bgcolor='rgba(0,0,0,0)',
+                height=380,
+                margin=dict(l=0, r=0, t=40, b=0),
+                xaxis_tickangle=-30,
+            )
+            fig_bal.add_hline(y=0, line_dash="dash", line_color="#555")
+            st.plotly_chart(fig_bal, use_container_width=True)
+
+        with col5b:
+            # Positivos vs Negativos por zona lado a lado
+            fig_pn = go.Figure()
+            fig_pn.add_trace(go.Bar(
+                x=bpz['Zona'], y=bpz['Positivos'],
+                name='Positivos', marker_color=COLOR_TEAL, text=bpz['Positivos'],
+                textposition='outside',
+            ))
+            fig_pn.add_trace(go.Bar(
+                x=bpz['Zona'], y=bpz['Negativos'],
+                name='Negativos', marker_color=COLOR_DANGER, text=bpz['Negativos'],
+                textposition='outside',
+            ))
+            fig_pn.update_layout(
+                barmode='group',
+                title="Positivos vs Negativos por Zona",
+                paper_bgcolor='rgba(0,0,0,0)',
+                height=380,
+                margin=dict(l=0, r=0, t=40, b=0),
+                xaxis_tickangle=-30,
+            )
+            st.plotly_chart(fig_pn, use_container_width=True)
+
+        # Mini KPIs de balance por zona
+        bpz_sorted = bpz.sort_values('Balance', ascending=False)
+        cols_per_row = 4
+        for i in range(0, len(bpz_sorted), cols_per_row):
+            row_items = bpz_sorted.iloc[i:i + cols_per_row]
+            cols = st.columns(cols_per_row)
+            for j, (_, row) in enumerate(row_items.iterrows()):
+                bal = int(row['Balance'])
+                cols[j].metric(
+                    f"⚖️ {row['Zona']}",
+                    bal,
+                    delta_color="normal" if bal >= 0 else "inverse",
                 )
-                rc2.markdown(_cell("✅ Positivos", cur_c['Positivos'], prv_c['Positivos'], 'positive'), unsafe_allow_html=True)
-                rc3.markdown(_cell("⚠️ Negativos", cur_c['Negativos'], prv_c['Negativos'], 'negative'), unsafe_allow_html=True)
-                rc4.markdown(_cell("🔄 Neutrales", cur_c['Neutrales'], prv_c['Neutrales'], 'neutral'),  unsafe_allow_html=True)
-                rc5.markdown(_cell("⚖️ Balance",   cur_c['Balance'],   prv_c['Balance'],   'positive'), unsafe_allow_html=True)
-                st.divider()
 
-        st.divider()
-        st.markdown(f"### 📆 Tendencia Anual — {anio}")
-        with st.spinner("Cargando datos anuales…"):
-            df_year = load_year_data(anio)
+    st.divider()
 
-        if not df_year.empty:
-            annual_rows = []
-            for mi in range(1, 13):
-                # FIX: EXTRACT devuelve float en algunos drivers (1.0 en vez de 1).
-                # Se convierte a int para la comparación.
-                if '_mes' in df_year.columns:
-                    df_mi = df_year[df_year['_mes'].astype(float).astype(int) == mi]
-                else:
-                    df_mi = pd.DataFrame()
-                km = calc_metrics(df_mi, tipo_map)
-                annual_rows.append({
-                    'Mes':       MESES[mi - 1],
-                    'Total':     km['total'],
-                    'Positivos': km['pos'],
-                    'Negativos': km['neg'],
-                    'Balance':   km['balance'],
-                })
-            df_annual = pd.DataFrame(annual_rows)
-            fig_ann   = px.line(
-                df_annual, x='Mes',
-                y=['Total', 'Positivos', 'Negativos', 'Balance'],
-                markers=True,
+    # ─────────────────────────────────────────────────────────────
+    # KPI 6 — Equipos recuperados (general y por zona)
+    # ─────────────────────────────────────────────────────────────
+    st.markdown("### 6️⃣ Estado de Equipos Instalados (Recuperados vs Nuevos)")
+
+    c6a, c6b, c6c = st.columns(3)
+    c6a.metric("♻️ Equipos Recuperados", kpi['recuperados_total'])
+    c6b.metric("🆕 Equipos Nuevos",      kpi['nuevos_total'])
+    c6c.metric("➖ No Aplica",           kpi['no_aplica_total'])
+
+    if not kpi['recuperados_por_zona'].empty:
+        rec_zona_df = kpi['recuperados_por_zona']
+
+        col6a, col6b = st.columns(2)
+
+        with col6a:
+            # Stacked: Recuperado / Nuevo / No Aplica por zona
+            fig_rec = px.bar(
+                rec_zona_df[rec_zona_df['Estado'] != 'No Aplica'],
+                x='Zona', y='N', color='Estado',
+                barmode='stack', text_auto=True,
                 color_discrete_map={
-                    'Total':     COLOR_PRIMARY,
-                    'Positivos': COLOR_TEAL,
-                    'Negativos': COLOR_DANGER,
-                    'Balance':   '#83c9ff',
+                    'Recuperado': COLOR_REC,
+                    'Nuevo':      COLOR_NEW,
                 },
-                title=f"Tendencia de Operaciones ONT — {anio}",
-                category_orders={'Mes': list(MESES)},
+                title="Recuperados vs Nuevos por Zona",
             )
-            fig_ann.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=380,
-                                  margin=dict(l=0, r=0, t=40, b=0))
-            st.plotly_chart(fig_ann, use_container_width=True)
+            fig_rec.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)', height=380,
+                margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+            )
+            st.plotly_chart(fig_rec, use_container_width=True)
+
+        with col6b:
+            # Pie total recuperados vs nuevos
+            if kpi['recuperados_total'] + kpi['nuevos_total'] > 0:
+                pie_eq = pd.DataFrame({
+                    'Estado':   ['Recuperado', 'Nuevo'],
+                    'Cantidad': [kpi['recuperados_total'], kpi['nuevos_total']],
+                })
+                fig_pie_eq = px.pie(
+                    pie_eq, names='Estado', values='Cantidad', hole=0.5,
+                    color_discrete_map={'Recuperado': COLOR_REC, 'Nuevo': COLOR_NEW},
+                    title="Distribución Global: Recuperados vs Nuevos",
+                )
+                fig_pie_eq.update_traces(textinfo='percent+label', textposition='inside')
+                fig_pie_eq.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)', height=380, showlegend=False,
+                )
+                st.plotly_chart(fig_pie_eq, use_container_width=True)
+
+        # Mini KPIs: recuperados por zona
+        rec_only = rec_zona_df[rec_zona_df['Estado'] == 'Recuperado'].set_index('Zona')['N'].to_dict()
+        if rec_only:
+            st.markdown("**♻️ Equipos Recuperados por Zona:**")
+            zona_rec_items = sorted(rec_only.items(), key=lambda x: x[1], reverse=True)
+            cols_per_row   = 4
+            for i in range(0, len(zona_rec_items), cols_per_row):
+                row_items = zona_rec_items[i:i + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for j, (zona, cnt) in enumerate(row_items):
+                    cols[j].metric(f"♻️ {zona}", cnt)
 
 t_idx += 1
 
@@ -789,8 +875,6 @@ if role in ('admin', 'auditor'):
             st.warning("⚠️ Faltan catálogos (zonas, técnicos o motivos). "
                        "Ve a ⚙️ Configuración y agrégalos primero.")
         else:
-            # FIX: recalcular tipo_map aquí para que esté disponible
-            # incluso si el usuario navega directo a esta pestaña
             _tipo_map_reg = get_tipo_map()
 
             with st.container(border=True):
@@ -800,9 +884,9 @@ if role in ('admin', 'auditor'):
                 )
 
                 cc1, cc2 = st.columns(2)
-                tec    = cc1.selectbox("🔧 Técnico de Campo *",              tecs_l,  key=f"tec_{fk}")
-                zona   = cc2.selectbox("🗺️ Zona *",                          zonas_l, key=f"zon_{fk}")
-                motivo = st.selectbox("📋 Motivo / Tipo de Operación *",     mots_l,  key=f"mot_{fk}")
+                tec    = cc1.selectbox("🔧 Técnico de Campo *",          tecs_l,  key=f"tec_{fk}")
+                zona   = cc2.selectbox("🗺️ Zona *",                      zonas_l, key=f"zon_{fk}")
+                motivo = st.selectbox("📋 Motivo / Tipo de Operación *", mots_l,  key=f"mot_{fk}")
 
                 tipo_sel = _tipo_map_reg.get(motivo, 'neutral')
                 if   tipo_sel == 'positive': st.success(f"✅ {TIPO_LABEL['positive']}")
@@ -811,8 +895,42 @@ if role in ('admin', 'auditor'):
 
                 st.divider()
                 sc1, sc2 = st.columns(2)
-                sn_elim = sc1.text_input("🔴 SN ONT Retirada / Eliminada (dejar en blanco si no aplica)", key=f"sne_{fk}")
-                sn_agr  = sc2.text_input("🟢 SN ONT Instalada / Agregada (dejar en blanco si no aplica)", key=f"sna_{fk}")
+                sn_elim = sc1.text_input(
+                    "🔴 SN ONT Retirada / Eliminada (dejar en blanco si no aplica)",
+                    key=f"sne_{fk}",
+                )
+                sn_agr = sc2.text_input(
+                    "🟢 SN ONT Instalada / Agregada (dejar en blanco si no aplica)",
+                    key=f"sna_{fk}",
+                )
+
+                # ── NUEVO: Estado del equipo instalado ──────────────────
+                st.divider()
+                st.markdown("#### 📦 Estado del Equipo Instalado")
+                estado_equipo = st.radio(
+                    "¿El equipo instalado/colocado es nuevo o recuperado?",
+                    options=ESTADO_EQUIPO_OPS,
+                    index=0,
+                    horizontal=True,
+                    key=f"eq_{fk}",
+                    help=(
+                        "**No Aplica:** No se colocó equipo (p.ej. solo desconexión).\n"
+                        "**Nuevo:** Equipo recién adquirido, sin uso previo.\n"
+                        "**Recuperado:** Equipo previamente usado / retirado de otro cliente."
+                    ),
+                )
+                if estado_equipo == "Recuperado":
+                    st.success("♻️ Equipo **recuperado** — se contará en métricas de recuperación.")
+                elif estado_equipo == "Nuevo":
+                    st.info("🆕 Equipo **nuevo**.")
+                else:
+                    st.caption("➖ No aplica para este tipo de operación.")
+
+                # Convertir a valor booleano / None
+                if   estado_equipo == "Recuperado": equipo_recuperado = True
+                elif estado_equipo == "Nuevo":       equipo_recuperado = False
+                else:                                equipo_recuperado = None
+                # ────────────────────────────────────────────────────────
 
                 st.divider()
                 dc1, dc2, dc3 = st.columns(3)
@@ -830,17 +948,18 @@ if role in ('admin', 'auditor'):
                         st.rerun()
                     else:
                         record = {
-                            'Fecha':          fecha_reg.strftime('%Y-%m-%d'),
-                            'Asesor':         st.session_state.username,
-                            'Tecnico':        tec,
-                            'Zona':           zona,
-                            'SN_Eliminada':   sn_elim.strip(),
-                            'SN_Agregada':    sn_agr.strip(),
-                            'Motivo':         motivo,
-                            'Cod_Cliente':    cod_cl.strip(),
-                            'Nombre_Cliente': nom_cl.strip(),
-                            'Orden_Trabajo':  ord_trab.strip(),
-                            'Descripcion':    desc.strip(),
+                            'Fecha':             fecha_reg.strftime('%Y-%m-%d'),
+                            'Asesor':            st.session_state.username,
+                            'Tecnico':           tec,
+                            'Zona':              zona,
+                            'SN_Eliminada':      sn_elim.strip(),
+                            'SN_Agregada':       sn_agr.strip(),
+                            'Motivo':            motivo,
+                            'Cod_Cliente':       cod_cl.strip(),
+                            'Nombre_Cliente':    nom_cl.strip(),
+                            'Orden_Trabajo':     ord_trab.strip(),
+                            'Descripcion':       desc.strip(),
+                            'Equipo_Recuperado': equipo_recuperado,
                         }
                         with st.spinner("Guardando en la base de datos…"):
                             ok = append_ont_record(record)
@@ -883,7 +1002,17 @@ if role in ('admin', 'auditor'):
         if '_mes' in df_hist.columns:
             df_hist = df_hist.drop(columns=['_mes'])
 
-        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        # Hacer la columna Equipo_Recuperado más legible en historial
+        if 'Equipo_Recuperado' in df_hist.columns:
+            df_hist_display = df_hist.copy()
+            df_hist_display['Equipo_Recuperado'] = df_hist_display['Equipo_Recuperado'].apply(
+                lambda x: '♻️ Recuperado' if x is True or x == True
+                else ('🆕 Nuevo' if x is False or x == False else '➖ No Aplica')
+            )
+        else:
+            df_hist_display = df_hist
+
+        st.dataframe(df_hist_display, use_container_width=True, hide_index=True)
         st.caption(f"📊 Total registros mostrados: **{len(df_hist)}**")
 
         # ── Eliminar (solo admin) ──
@@ -910,7 +1039,6 @@ if role in ('admin', 'auditor'):
                             st.rerun()
 
         st.divider()
-        # FIX: Verificar que df_hist no esté vacío antes de ofrecer descarga
         csv_data = df_hist.to_csv(index=False).encode('utf-8') if not df_hist.empty else b""
         st.download_button(
             "📥 Descargar CSV",
@@ -1099,8 +1227,6 @@ if role == 'admin' and len(tabs) > t_idx:
             with u_col2:
                 df_u_all = _get_users_raw()
                 if not df_u_all.empty:
-                    # FIX: normalizar nombres de columna a minúsculas para
-                    # evitar KeyError si el driver retorna en otro case
                     df_u_all.columns = [c.lower() for c in df_u_all.columns]
 
                     df_sa = df_u_all[df_u_all['username'] == SUPERADMIN]
