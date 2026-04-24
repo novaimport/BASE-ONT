@@ -31,17 +31,18 @@ MESES = ("Enero","Febrero","Marzo","Abril","Mayo","Junio",
 SUPERADMIN = 'Admin'
 
 TIPO_LABEL = {
-    'positive': '✅ Positivo (Instalac. / Reconex. / Cambio / Renov.)',
-    'negative': '⚠️ Negativo (Problema / Desconex.)',
-    'neutral':  '🔄 Neutral (Otros)',
+    'positive': '✅ Positivo (Instalación, Reconexión, Cambio, Renovación)',
+    'negative': '⚠️ Negativo (Problema Técnico, Desconexión)',
+    'neutral':  '🔄 Neutral (Otras Operaciones)',
 }
 TIPO_COLOR = {'positive': COLOR_TEAL, 'negative': COLOR_DANGER, 'neutral': COLOR_WARN}
 TIPO_EMOJI = {'positive': '🟢', 'negative': '🔴', 'neutral': '🟡'}
 
-ESTADO_EQUIPO_OPS = ["No Aplica", "Nuevo", "Recuperado"]
+# Se eliminó "No Aplica" según solicitud
+ESTADO_EQUIPO_OPS = ["Nuevo", "Recuperado"]
 
 # ─────────────────────────────────────────────────────────────────────
-# 2. CSS
+# 2. ESTILOS CSS
 # ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -61,7 +62,7 @@ button[data-baseweb="tab"][aria-selected="true"] p{color:#fff!important}
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────
-# 3. SESSION STATE Y DB CONNECTION
+# 3. ESTADO DE SESIÓN Y CONEXIÓN A BASE DE DATOS
 # ─────────────────────────────────────────────────────────────────────
 _DEFAULTS = {
     'logged_in': False, 'role': '', 'username': '',
@@ -94,7 +95,7 @@ except Exception as e:
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────
-# 4. PASSWORD HELPERS
+# 4. FUNCIONES AUXILIARES DE CONTRASEÑA
 # ─────────────────────────────────────────────────────────────────────
 def _hash(p: str) -> str:
     return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
@@ -109,9 +110,9 @@ def _validate_pw(p: str):
     if len(p) < 8:
         return "Mínimo 8 caracteres."
     if not re.search(r'[A-Z]', p):
-        return "Necesita al menos una mayúscula."
+        return "Necesita al menos una letra mayúscula."
     if not re.search(r'[a-z]', p):
-        return "Necesita al menos una minúscula."
+        return "Necesita al menos una letra minúscula."
     if not re.search(r'\d', p):
         return "Necesita al menos un número."
     if not re.search(r'[!@#$%^&*()\-_=+\[\]{};:\'",.<>/?`~\\|]', p):
@@ -123,7 +124,7 @@ def _validate_pw(p: str):
 # ─────────────────────────────────────────────────────────────────────
 def get_zonas() -> list:
     try:
-        df = conn.query("SELECT nombre FROM zonas ORDER BY nombre ASC", ttl=10)
+        df = conn.query("SELECT nombre FROM zonas ORDER BY nombre ASC", ttl=5)
         if df.empty:
             return []
         col = df.columns[0]
@@ -134,7 +135,7 @@ def get_zonas() -> list:
 
 def get_tecnicos() -> list:
     try:
-        df = conn.query("SELECT nombre FROM tecnicos ORDER BY nombre ASC", ttl=10)
+        df = conn.query("SELECT nombre FROM tecnicos ORDER BY nombre ASC", ttl=5)
         if df.empty:
             return []
         col = df.columns[0]
@@ -145,7 +146,7 @@ def get_tecnicos() -> list:
 
 def get_motivos_df() -> pd.DataFrame:
     try:
-        df = conn.query("SELECT motivo, tipo FROM motivos ORDER BY motivo ASC", ttl=10)
+        df = conn.query("SELECT motivo, tipo FROM motivos ORDER BY motivo ASC", ttl=5)
         if df.empty:
             return pd.DataFrame(columns=['Motivo', 'Tipo'])
         df.columns = [c.lower() for c in df.columns]
@@ -160,18 +161,26 @@ def get_motivos_list() -> list:
 
 def get_tipo_map() -> dict:
     df = get_motivos_df()
+    d_map = {}
     if not df.empty:
-        return dict(zip(df["Motivo"], df["Tipo"]))
-    return {}
+        d_map = dict(zip(df["Motivo"], df["Tipo"]))
+        
+    # Forzar que estos motivos específicos siempre sean positivos según el requerimiento 2
+    if "Cambio de Tecnología" in d_map: 
+        d_map["Cambio de Tecnología"] = "positive"
+    if "Cambio por Renovación" in d_map: 
+        d_map["Cambio por Renovación"] = "positive"
+        
+    return d_map
 
 # ─────────────────────────────────────────────────────────────────────
-# 6. USER MANAGEMENT
+# 6. GESTIÓN DE USUARIOS
 # ─────────────────────────────────────────────────────────────────────
 def _get_users_raw() -> pd.DataFrame:
     try:
         return conn.query(
             "SELECT username, role, is_banned, failed_attempts FROM usuarios ORDER BY username ASC",
-            ttl=5,
+            ttl=2,
         )
     except Exception as e:
         st.error(f"Error cargando usuarios: {e}")
@@ -215,7 +224,7 @@ def _get_db_token(username: str) -> str:
     return str(user.get('session_token') or '')
 
 # ─────────────────────────────────────────────────────────────────────
-# 7. LOGIN
+# 7. INICIO DE SESIÓN
 # ─────────────────────────────────────────────────────────────────────
 def do_login():
     u = st.session_state.log_u
@@ -254,7 +263,7 @@ def do_login():
             pass
 
     if is_banned:
-        st.session_state.log_err = "❌ Cuenta baneada permanentemente."
+        st.session_state.log_err = "❌ Cuenta inhabilitada permanentemente."
         return
 
     if _check(p, str(user.get('password_hash', ''))):
@@ -278,18 +287,18 @@ def do_login():
         fa += 1
         if fa >= 6:
             _update_user_fields(u, {'is_banned': True, 'failed_attempts': fa})
-            st.session_state.log_err = "❌ Cuenta baneada permanentemente."
+            st.session_state.log_err = "❌ Cuenta inhabilitada permanentemente por seguridad."
         elif fa % 3 == 0:
             lock_until = now + timedelta(minutes=5)
             _update_user_fields(u, {'locked_until': lock_until, 'failed_attempts': fa})
-            st.session_state.log_err = "⏳ Demasiados intentos. Bloqueado 5 min."
+            st.session_state.log_err = "⏳ Demasiados intentos fallidos. Bloqueo de 5 min."
         else:
             _update_user_fields(u, {'failed_attempts': fa})
             st.session_state.log_err = "❌ Credenciales incorrectas."
         st.session_state.log_u = ''
         st.session_state.log_p = ''
 
-# ── Pantalla de login ──
+# ── PANTALLA DE LOGIN ──
 if not st.session_state.logged_in:
     st.markdown("<div style='margin-top:14vh;'></div>", unsafe_allow_html=True)
     _, col, _ = st.columns([1, 1.2, 1])
@@ -299,7 +308,7 @@ if not st.session_state.logged_in:
             <div style='text-align:center;padding:20px 0 12px'>
                 <div style='font-size:52px'>📡</div>
                 <h2 style='color:#fff;font-weight:700;margin:8px 0 4px'>ONT Manager</h2>
-                <p style='color:#a5a8b5;margin:0'>ISP Network Operations</p>
+                <p style='color:#a5a8b5;margin:0'>Gestión Operativa de Redes ISP</p>
             </div>""", unsafe_allow_html=True)
             if st.session_state.log_err:
                 st.error(st.session_state.log_err, icon="⚠️")
@@ -308,7 +317,7 @@ if not st.session_state.logged_in:
             st.text_input("Contraseña", key="log_p", type="password")
             st.button("Iniciar Sesión", type="primary",
                       on_click=do_login, use_container_width=True)
-            st.caption("Contacta al administrador para gestionar tu acceso.")
+            st.caption("Contacta al administrador del sistema para gestionar tu acceso.")
     st.stop()
 
 # ── Validación de sesión única ──
@@ -318,11 +327,11 @@ if _local_tok:
     if _db_tok and _db_tok != _local_tok:
         for _k, _v in _DEFAULTS.items():
             st.session_state[_k] = _v
-        _flash("⚠️ Tu sesión fue cerrada porque el mismo usuario inició sesión desde otro dispositivo.", 'error')
+        _flash("⚠️ Tu sesión fue cerrada porque se inició sesión desde otro dispositivo con este usuario.", 'error')
         st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────
-# 8. DATA FUNCTIONS (PostgreSQL)
+# 8. FUNCIONES DE EXTRACCIÓN DE DATOS (PostgreSQL)
 # ─────────────────────────────────────────────────────────────────────
 _COL_MAP = {
     'id':                 'ID',
@@ -347,6 +356,7 @@ def _rename_cols(df: pd.DataFrame, extra: dict = None) -> pd.DataFrame:
         mapping.update(extra)
     return df.rename(columns={k: v for k, v in mapping.items() if k in df.columns})
 
+# Uso de ttl=2 (caché muy corto) para una sensación de actualización en tiempo real sin saturar la DB
 def load_month_data(y: int, m: int) -> pd.DataFrame:
     sql = f"""
         SELECT id, fecha, asesor, tecnico, zona,
@@ -360,7 +370,7 @@ def load_month_data(y: int, m: int) -> pd.DataFrame:
         ORDER BY timestamp DESC
     """
     try:
-        df = conn.query(sql, ttl=600)
+        df = conn.query(sql, ttl=2)
         if df.empty:
             return df
         return _rename_cols(df)
@@ -381,13 +391,29 @@ def load_year_data(y: int) -> pd.DataFrame:
         ORDER BY timestamp DESC
     """
     try:
-        df = conn.query(sql, ttl=600)
+        df = conn.query(sql, ttl=2)
         if df.empty:
             return df
         df = _rename_cols(df, {'mes_num': '_mes'})
         return df
     except Exception as e:
         st.error(f"Error cargando datos del año: {e}")
+        return pd.DataFrame()
+
+def get_recent_records(limit: int = 10) -> pd.DataFrame:
+    """Extrae los últimos movimientos globales en tiempo real para el panel lateral de registros."""
+    sql = f"""
+        SELECT fecha AS "Fecha", asesor AS "Asesor", 
+               motivo AS "Motivo", nombre_cliente AS "Cliente"
+        FROM registros_ont
+        WHERE eliminado = FALSE
+        ORDER BY timestamp DESC
+        LIMIT {limit}
+    """
+    try:
+        df = conn.query(sql, ttl=2)
+        return df
+    except Exception as e:
         return pd.DataFrame()
 
 def append_ont_record(record: dict) -> bool:
@@ -410,16 +436,16 @@ def append_ont_record(record: dict) -> bool:
         "nc":  record.get('Nombre_Cliente'),
         "ot":  record.get('Orden_Trabajo'),
         "d":   record.get('Descripcion', ''),
-        "er":  record.get('Equipo_Recuperado'),   # None | True | False
+        "er":  record.get('Equipo_Recuperado'),   # Boolean True/False
     }
     try:
         with conn.session as s:
             s.execute(sql, params)
             s.commit()
-        st.cache_data.clear()
+        st.cache_data.clear() # Obligamos a la app a borrar memoria cache y pedir nuevos datos
         return True
     except Exception as e:
-        st.error(f"Error guardando registro: {e}")
+        st.error(f"Error guardando registro en base de datos: {e}")
         return False
 
 def soft_delete_record(record_id) -> bool:
@@ -434,7 +460,7 @@ def soft_delete_record(record_id) -> bool:
         return False
 
 # ─────────────────────────────────────────────────────────────────────
-# 9. MÉTRICAS
+# 9. MOTOR DE CÁLCULO DE MÉTRICAS (KPIs)
 # ─────────────────────────────────────────────────────────────────────
 def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
     base = {
@@ -445,7 +471,7 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
         'balance_por_zona': pd.DataFrame(),
         'recuperados_total': 0,
         'nuevos_total': 0,
-        'no_aplica_total': 0,
+        'no_aplica_total': 0, # Se mantiene a nivel de lógica por si hay datos antiguos nulos
         'recuperados_por_zona': pd.DataFrame(),
     }
     if df is None or df.empty:
@@ -461,19 +487,19 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
     neg = sum(v for k, v in pm.items() if tipo_map.get(k, 'neutral') == 'negative')
     neu = total - pos - neg
 
-    # ── Acciones por tipo por zona (stacked) ──
+    # ── Operaciones por tipo según zona (Gráfico apilado) ──
     pzt = pd.DataFrame()
     if 'Zona' in df.columns and 'Motivo' in df.columns:
         df2         = df.copy()
         df2['Tipo'] = df2['Motivo'].map(lambda x: tipo_map.get(x, 'neutral').capitalize())
         pzt         = df2.groupby(['Zona', 'Tipo']).size().reset_index(name='N')
 
-    # ── Acciones por motivo por zona (para gráfica detallada) ──
+    # ── Operaciones específicas (Motivo) por zona ──
     pzm = pd.DataFrame()
     if 'Zona' in df.columns and 'Motivo' in df.columns:
         pzm = df.groupby(['Zona', 'Motivo']).size().reset_index(name='N')
 
-    # ── Balance neto por zona (positivos - negativos) ──
+    # ── Balance operativo neto por zona (Positivas - Negativas) ──
     bpz = pd.DataFrame()
     if 'Zona' in df.columns and 'Motivo' in df.columns:
         df3          = df.copy()
@@ -484,7 +510,7 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
         bpz['Balance'] = bpz['Positivos'] - bpz['Negativos']
         bpz[['Positivos', 'Negativos', 'Balance']] = bpz[['Positivos', 'Negativos', 'Balance']].astype(int)
 
-    # ── Equipos recuperados / nuevos ──
+    # ── Inventario de Equipos (Nuevos / Recuperados) ──
     rec_total  = 0
     new_total  = 0
     nap_total  = 0
@@ -515,17 +541,8 @@ def calc_metrics(df: pd.DataFrame, tipo_map: dict) -> dict:
         'recuperados_por_zona': rec_zona,
     }
 
-def _delta_str(cur, prv) -> str:
-    d = cur - prv
-    return ('+' if d >= 0 else '') + str(d)
-
-def _delta_color(cur, prv, tipo: str) -> str:
-    if tipo == 'negative':
-        return 'inverse'
-    return 'normal'
-
 # ─────────────────────────────────────────────────────────────────────
-# 10. SIDEBAR
+# 10. PANEL LATERAL (SIDEBAR)
 # ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.caption(
@@ -535,12 +552,12 @@ with st.sidebar:
     st.divider()
 
     now_sv  = datetime.now(SV_TZ)
-    anio    = st.selectbox("🗓️ Año",  [now_sv.year, now_sv.year - 1], index=0)
-    mes_sel = st.selectbox("📅 Mes",  list(MESES), index=now_sv.month - 1)
+    anio    = st.selectbox("🗓️ Año Operativo",  [now_sv.year, now_sv.year - 1], index=0)
+    mes_sel = st.selectbox("📅 Mes Operativo",  list(MESES), index=now_sv.month - 1)
     m_idx   = MESES.index(mes_sel) + 1
 
     st.divider()
-    if st.button("🚪 Cerrar Sesión", use_container_width=True):
+    if st.button("🚪 Cerrar Sesión Segura", use_container_width=True):
         try:
             _update_user_fields(st.session_state.username, {'session_token': None})
         except Exception:
@@ -554,52 +571,55 @@ with st.sidebar:
         </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────
-# 11. TABS
+# 11. SISTEMA DE PESTAÑAS (TABS)
 # ─────────────────────────────────────────────────────────────────────
 role = st.session_state.role
 
 if role == 'admin':
-    _tabs = ["📊 Dashboard", "📝 Registrar", "🗂️ Historial", "⚙️ Configuración"]
+    _tabs = ["📊 Dashboard Analítico", "📝 Registrar Movimiento", "🗂️ Historial General", "⚙️ Configuración"]
 else:
-    _tabs = ["📊 Dashboard", "📝 Registrar", "🗂️ Historial"]
+    _tabs = ["📊 Dashboard Analítico", "📝 Registrar Movimiento", "🗂️ Historial General"]
 
 tabs  = st.tabs(_tabs)
 t_idx = 0
 
 # ═════════════════════════════════════════════════════════════════════
-# TAB 0 — DASHBOARD
+# PESTAÑA 0 — DASHBOARD ANALÍTICO
 # ═════════════════════════════════════════════════════════════════════
 with tabs[t_idx]:
-    st.title(f"📊 Dashboard ONT — {mes_sel} {anio}")
+    st_c1, st_c2 = st.columns([5, 1])
+    st_c1.title(f"📊 Dashboard Operativo — {mes_sel} {anio}")
+    if st_c2.button("🔄 Actualizar Datos", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
     tipo_map = get_tipo_map()
     df_cur   = load_month_data(anio, m_idx)
     kpi      = calc_metrics(df_cur, tipo_map)
 
     # ─────────────────────────────────────────────────────────────
-    # KPI 1 — Cantidad total de acciones realizadas en general
+    # KPI 1 — Cantidad total de operaciones realizadas
     # ─────────────────────────────────────────────────────────────
-    st.markdown("### 1️⃣ Acciones Realizadas en General")
+    st.markdown("### 1️⃣ Resumen General de Operaciones Realizadas")
 
     if df_cur.empty:
-        st.info("ℹ️ No hay registros para este mes. Comienza registrando un movimiento.")
-        pass  # Eliminado st.stop() para no romper tabs
+        st.info("ℹ️ No existen registros en la base de datos para este mes. Comienza registrando un movimiento para ver las estadísticas.")
+        pass 
     else:
-
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("📦 Total Acciones",          kpi['total'])
-        c2.metric("✅ Positivas",               kpi['pos'])
-        c3.metric("⚠️ Negativas",              kpi['neg'])
-        c4.metric("🔄 Neutrales",              kpi['neu'])
-        c5.metric("⚖️ Balance Neto",           kpi['balance'],
+        c1.metric("📦 Total de Operaciones",           kpi['total'])
+        c2.metric("✅ Operaciones Positivas",          kpi['pos'])
+        c3.metric("⚠️ Operaciones Negativas",          kpi['neg'])
+        c4.metric("🔄 Operaciones Neutrales",          kpi['neu'])
+        c5.metric("⚖️ Balance Neto (Pos vs Neg)",       kpi['balance'],
                   delta_color="normal" if kpi['balance'] >= 0 else "inverse")
 
         st.divider()
 
         # ─────────────────────────────────────────────────────────────
-        # KPI 2 — Cantidad de acciones por tipo (motivo)
+        # KPI 2 — Cantidad de operaciones por motivo
         # ─────────────────────────────────────────────────────────────
-        st.markdown("### 2️⃣ Acciones por Tipo de Operación (Motivo)")
+        st.markdown("### 2️⃣ Distribución de Operaciones por Motivo")
 
         if kpi['por_motivo']:
             pm_df = (
@@ -614,7 +634,7 @@ with tabs[t_idx]:
                 fig_mot = px.bar(
                     pm_df, x='Cantidad', y='Motivo', orientation='h',
                     text_auto=True,
-                    title="Cantidad de Acciones por Motivo",
+                    title="Cantidad de Operaciones Clasificadas por Motivo",
                 )
                 fig_mot.update_traces(marker_color=pm_df['Color'].tolist())
                 fig_mot.update_layout(
@@ -631,13 +651,13 @@ with tabs[t_idx]:
                 fig_pie = px.pie(
                     pie_df, names='Tipo', values='Cantidad', hole=0.5,
                     color_discrete_sequence=[COLOR_TEAL, COLOR_DANGER, COLOR_WARN],
-                    title="Distribución por Tipo",
+                    title="Porcentaje de Operaciones por Tipo",
                 )
                 fig_pie.update_traces(textinfo='percent+label', textposition='inside')
                 fig_pie.update_layout(paper_bgcolor='rgba(0,0,0,0)', height=380, showlegend=False)
                 st.plotly_chart(fig_pie, use_container_width=True)
 
-            # Mini KPIs por motivo
+            # Mini KPIs ordenados por motivo
             motivo_items = sorted(kpi['por_motivo'].items(), key=lambda x: x[1], reverse=True)
             cols_per_row = 4
             for i in range(0, len(motivo_items), cols_per_row):
@@ -651,20 +671,20 @@ with tabs[t_idx]:
         st.divider()
 
         # ─────────────────────────────────────────────────────────────
-        # KPI 3 — Cantidad de acciones por zona (general)
+        # KPI 3 — Total de acciones por zona
         # ─────────────────────────────────────────────────────────────
-        st.markdown("### 3️⃣ Acciones por Zona (General)")
+        st.markdown("### 3️⃣ Volumen de Operaciones por Zona")
 
         if kpi['por_zona']:
             z_df = (
-                pd.DataFrame(list(kpi['por_zona'].items()), columns=['Zona', 'Operaciones'])
-                .sort_values('Operaciones', ascending=False)
+                pd.DataFrame(list(kpi['por_zona'].items()), columns=['Zona', 'Cantidad de Operaciones'])
+                .sort_values('Cantidad de Operaciones', ascending=False)
             )
             fig_z = px.bar(
-                z_df, x='Zona', y='Operaciones', text_auto=True,
-                color='Operaciones',
+                z_df, x='Zona', y='Cantidad de Operaciones', text_auto=True,
+                color='Cantidad de Operaciones',
                 color_continuous_scale=[[0, '#1d2c59'], [0.5, COLOR_PRIMARY], [1, COLOR_TEAL]],
-                title=f"Total de Acciones por Zona — {mes_sel} {anio}",
+                title=f"Despliegue General por Zona — {mes_sel} {anio}",
             )
             fig_z.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)', height=380,
@@ -679,18 +699,17 @@ with tabs[t_idx]:
                 row_items = zona_items[i:i + cols_per_row]
                 cols = st.columns(cols_per_row)
                 for j, (zona, cnt) in enumerate(row_items):
-                    cols[j].metric(f"🗺️ {zona}", cnt)
+                    cols[j].metric(f"🗺️ Zona {zona}", cnt)
 
         st.divider()
 
         # ─────────────────────────────────────────────────────────────
-        # KPI 4 — Acciones por tipo (motivo) por zona
+        # KPI 4 — Desglose de tipos de operación por zona
         # ─────────────────────────────────────────────────────────────
-        st.markdown("### 4️⃣ Acciones por Tipo de Operación · Por Zona")
+        st.markdown("### 4️⃣ Desglose de Tipos de Operación Mapeados por Zona")
 
         col4a, col4b = st.columns(2)
 
-        # Gráfica apilada por tipo (Positivo / Negativo / Neutral) por zona
         with col4a:
             if not kpi['por_zona_tipo'].empty:
                 fig_zt = px.bar(
@@ -701,34 +720,35 @@ with tabs[t_idx]:
                         'Negative': COLOR_DANGER,
                         'Neutral':  COLOR_WARN,
                     },
-                    title="Tipo de Operación por Zona (apilado)",
+                    title="Operaciones Positivas, Negativas y Neutrales por Zona",
                 )
                 fig_zt.update_layout(
                     paper_bgcolor='rgba(0,0,0,0)', height=400,
                     margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+                    yaxis_title="Total de Operaciones",
                 )
                 st.plotly_chart(fig_zt, use_container_width=True)
 
-        # Gráfica agrupada por motivo específico por zona
         with col4b:
             if not kpi['por_zona_motivo'].empty:
                 fig_zm = px.bar(
                     kpi['por_zona_motivo'], x='Zona', y='N', color='Motivo',
                     barmode='group', text_auto=True,
-                    title="Motivo Específico por Zona (agrupado)",
+                    title="Comparativa de Motivos Específicos desplegados por Zona",
                 )
                 fig_zm.update_layout(
                     paper_bgcolor='rgba(0,0,0,0)', height=400,
                     margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+                    yaxis_title="Total de Operaciones",
                 )
                 st.plotly_chart(fig_zm, use_container_width=True)
 
         st.divider()
 
         # ─────────────────────────────────────────────────────────────
-        # KPI 5 — Balance por zona según cada acción
+        # KPI 5 — Balance operativo por zona
         # ─────────────────────────────────────────────────────────────
-        st.markdown("### 5️⃣ Balance por Zona")
+        st.markdown("### 5️⃣ Balance Operativo por Zona (Instalaciones vs Retiros)")
 
         if not kpi['balance_por_zona'].empty:
             bpz = kpi['balance_por_zona']
@@ -736,7 +756,6 @@ with tabs[t_idx]:
             col5a, col5b = st.columns(2)
 
             with col5a:
-                # Balance neto por zona
                 colors_balance = [COLOR_TEAL if b >= 0 else COLOR_DANGER for b in bpz['Balance']]
                 fig_bal = go.Figure()
                 fig_bal.add_trace(go.Bar(
@@ -748,7 +767,7 @@ with tabs[t_idx]:
                     name='Balance Neto',
                 ))
                 fig_bal.update_layout(
-                    title="Balance Neto por Zona (Positivos − Negativos)",
+                    title="Balance Neto Creciente por Zona (Operaciones Positivas − Negativas)",
                     paper_bgcolor='rgba(0,0,0,0)',
                     height=380,
                     margin=dict(l=0, r=0, t=40, b=0),
@@ -758,21 +777,20 @@ with tabs[t_idx]:
                 st.plotly_chart(fig_bal, use_container_width=True)
 
             with col5b:
-                # Positivos vs Negativos por zona lado a lado
                 fig_pn = go.Figure()
                 fig_pn.add_trace(go.Bar(
                     x=bpz['Zona'], y=bpz['Positivos'],
-                    name='Positivos', marker_color=COLOR_TEAL, text=bpz['Positivos'],
+                    name='Impactos Positivos', marker_color=COLOR_TEAL, text=bpz['Positivos'],
                     textposition='outside',
                 ))
                 fig_pn.add_trace(go.Bar(
                     x=bpz['Zona'], y=bpz['Negativos'],
-                    name='Negativos', marker_color=COLOR_DANGER, text=bpz['Negativos'],
+                    name='Impactos Negativos', marker_color=COLOR_DANGER, text=bpz['Negativos'],
                     textposition='outside',
                 ))
                 fig_pn.update_layout(
                     barmode='group',
-                    title="Positivos vs Negativos por Zona",
+                    title="Comparativa Directa: Positivos vs Negativos por Zona",
                     paper_bgcolor='rgba(0,0,0,0)',
                     height=380,
                     margin=dict(l=0, r=0, t=40, b=0),
@@ -780,7 +798,7 @@ with tabs[t_idx]:
                 )
                 st.plotly_chart(fig_pn, use_container_width=True)
 
-            # Mini KPIs de balance por zona
+            # Mini KPIs de balance
             bpz_sorted = bpz.sort_values('Balance', ascending=False)
             cols_per_row = 4
             for i in range(0, len(bpz_sorted), cols_per_row):
@@ -789,7 +807,7 @@ with tabs[t_idx]:
                 for j, (_, row) in enumerate(row_items.iterrows()):
                     bal = int(row['Balance'])
                     cols[j].metric(
-                        f"⚖️ {row['Zona']}",
+                        f"⚖️ Neto {row['Zona']}",
                         bal,
                         delta_color="normal" if bal >= 0 else "inverse",
                     )
@@ -797,14 +815,17 @@ with tabs[t_idx]:
         st.divider()
 
         # ─────────────────────────────────────────────────────────────
-        # KPI 6 — Equipos recuperados (general y por zona)
+        # KPI 6 — Inventario de Equipos (Nuevos vs Recuperados)
         # ─────────────────────────────────────────────────────────────
-        st.markdown("### 6️⃣ Estado de Equipos Instalados (Recuperados vs Nuevos)")
+        st.markdown("### 6️⃣ Inventario de Equipos Instalados (Nuevos vs Recuperados)")
 
         c6a, c6b, c6c = st.columns(3)
-        c6a.metric("♻️ Equipos Recuperados", kpi['recuperados_total'])
-        c6b.metric("🆕 Equipos Nuevos",      kpi['nuevos_total'])
-        c6c.metric("➖ No Aplica",           kpi['no_aplica_total'])
+        c6a.metric("♻️ Equipos Recuperados y Reinstalados", kpi['recuperados_total'])
+        c6b.metric("🆕 Equipos Nuevos de Inventario",      kpi['nuevos_total'])
+        
+        # Ocultamos esta métrica visualmente si es cero, ya que quitamos la opcion del formulario
+        if kpi['no_aplica_total'] > 0:
+            c6c.metric("➖ Sin Equipo (Datos Antiguos)",      kpi['no_aplica_total'])
 
         if not kpi['recuperados_por_zona'].empty:
             rec_zona_df = kpi['recuperados_por_zona']
@@ -812,7 +833,6 @@ with tabs[t_idx]:
             col6a, col6b = st.columns(2)
 
             with col6a:
-                # Stacked: Recuperado / Nuevo / No Aplica por zona
                 fig_rec = px.bar(
                     rec_zona_df[rec_zona_df['Estado'] != 'No Aplica'],
                     x='Zona', y='N', color='Estado',
@@ -821,25 +841,25 @@ with tabs[t_idx]:
                         'Recuperado': COLOR_REC,
                         'Nuevo':      COLOR_NEW,
                     },
-                    title="Recuperados vs Nuevos por Zona",
+                    title="Distribución de Equipos Nuevos y Recuperados por Zona",
                 )
                 fig_rec.update_layout(
                     paper_bgcolor='rgba(0,0,0,0)', height=380,
                     margin=dict(l=0, r=0, t=40, b=0), xaxis_tickangle=-30,
+                    yaxis_title="Cantidad de Equipos",
                 )
                 st.plotly_chart(fig_rec, use_container_width=True)
 
             with col6b:
-                # Pie total recuperados vs nuevos
                 if kpi['recuperados_total'] + kpi['nuevos_total'] > 0:
                     pie_eq = pd.DataFrame({
-                        'Estado':   ['Recuperado', 'Nuevo'],
+                        'Estado':   ['Equipos Recuperados', 'Equipos Nuevos'],
                         'Cantidad': [kpi['recuperados_total'], kpi['nuevos_total']],
                     })
                     fig_pie_eq = px.pie(
                         pie_eq, names='Estado', values='Cantidad', hole=0.5,
-                        color_discrete_map={'Recuperado': COLOR_REC, 'Nuevo': COLOR_NEW},
-                        title="Distribución Global: Recuperados vs Nuevos",
+                        color_discrete_map={'Equipos Recuperados': COLOR_REC, 'Equipos Nuevos': COLOR_NEW},
+                        title="Proporción de Uso Global de Equipos",
                     )
                     fig_pie_eq.update_traces(textinfo='percent+label', textposition='inside')
                     fig_pie_eq.update_layout(
@@ -847,152 +867,177 @@ with tabs[t_idx]:
                     )
                     st.plotly_chart(fig_pie_eq, use_container_width=True)
 
-            # Mini KPIs: recuperados por zona
+            # Mini KPIs: equipos recuperados por zona
             rec_only = rec_zona_df[rec_zona_df['Estado'] == 'Recuperado'].set_index('Zona')['N'].to_dict()
             if rec_only:
-                st.markdown("**♻️ Equipos Recuperados por Zona:**")
+                st.markdown("**♻️ Ahorro de Capital: Equipos Recuperados por Zona Geográfica**")
                 zona_rec_items = sorted(rec_only.items(), key=lambda x: x[1], reverse=True)
                 cols_per_row   = 4
                 for i in range(0, len(zona_rec_items), cols_per_row):
                     row_items = zona_rec_items[i:i + cols_per_row]
                     cols = st.columns(cols_per_row)
                     for j, (zona, cnt) in enumerate(row_items):
-                        cols[j].metric(f"♻️ {zona}", cnt)
+                        cols[j].metric(f"♻️ Zona {zona}", cnt)
 
 t_idx += 1
 
 # ═════════════════════════════════════════════════════════════════════
-# TAB 1 — REGISTRAR
+# PESTAÑA 1 — REGISTRAR MOVIMIENTO (FORMULARIO E HISTORIAL RECIENTE)
 # ═════════════════════════════════════════════════════════════════════
 if role in ('admin', 'auditor'):
     with tabs[t_idx]:
-        st.title("📝 Registrar Movimiento de ONT")
-        fk = st.session_state.form_reset
+        
+        # Division de pantalla: Izquierda (Formulario) y Derecha (Historial Reciente)
+        col_form, col_hist = st.columns([2.5, 1.5])
+        
+        with col_form:
+            st.title("📝 Registrar Nuevo Movimiento")
+            fk = st.session_state.form_reset
 
-        zonas_l = get_zonas()
-        tecs_l  = get_tecnicos()
-        mots_l  = get_motivos_list()
-        today   = datetime.now(SV_TZ).date()
+            zonas_l = get_zonas()
+            tecs_l  = get_tecnicos()
+            mots_l  = get_motivos_list()
+            today   = datetime.now(SV_TZ).date()
 
-        if not zonas_l or not tecs_l or not mots_l:
-            st.warning("⚠️ Faltan catálogos (zonas, técnicos o motivos). "
-                       "Ve a ⚙️ Configuración y agrégalos primero.")
-        else:
-            _tipo_map_reg = get_tipo_map()
+            if not zonas_l or not tecs_l or not mots_l:
+                st.warning("⚠️ Faltan datos en los catálogos (Zonas, Técnicos o Motivos). "
+                           "Ve a ⚙️ Configuración y agrégalos para poder registrar información.")
+            else:
+                _tipo_map_reg = get_tipo_map()
 
-            with st.container(border=True):
-                st.info(
-                    f"👤 **Asesor registrado automáticamente:** `{st.session_state.username}`  "
-                    f"|  📅 **Hoy:** `{today.strftime('%d/%m/%Y')}`"
-                )
+                with st.container(border=True):
+                    st.info(
+                        f"👤 **Asesor Activo:** `{st.session_state.username}`  "
+                        f"|  📅 **Fecha de Operación:** `{today.strftime('%d/%m/%Y')}`"
+                    )
+                    st.caption("Los campos marcados con asterisco (*) son de llenado obligatorio.")
 
-                cc1, cc2 = st.columns(2)
-                tec    = cc1.selectbox("🔧 Técnico de Campo *",          tecs_l,  key=f"tec_{fk}")
-                zona   = cc2.selectbox("🗺️ Zona *",                      zonas_l, key=f"zon_{fk}")
-                motivo = st.selectbox("📋 Motivo / Tipo de Operación *", mots_l,  key=f"mot_{fk}")
+                    cc1, cc2 = st.columns(2)
+                    tec    = cc1.selectbox("🔧 Técnico de Campo Asignado *",          tecs_l,  key=f"tec_{fk}")
+                    zona   = cc2.selectbox("🗺️ Zona Geográfica / Nodo *",           zonas_l, key=f"zon_{fk}")
+                    motivo = st.selectbox("📋 Motivo de la Operación Técnica *", mots_l,  key=f"mot_{fk}")
 
-                tipo_sel = _tipo_map_reg.get(motivo, 'neutral')
-                if   tipo_sel == 'positive': st.success(f"✅ {TIPO_LABEL['positive']}")
-                elif tipo_sel == 'negative': st.warning(f"⚠️ {TIPO_LABEL['negative']}")
-                else:                        st.info(f"🔄 {TIPO_LABEL['neutral']}")
+                    tipo_sel = _tipo_map_reg.get(motivo, 'neutral')
+                    if   tipo_sel == 'positive': st.success(f"✅ Se medirá como: {TIPO_LABEL['positive']}")
+                    elif tipo_sel == 'negative': st.warning(f"⚠️ Se medirá como: {TIPO_LABEL['negative']}")
+                    else:                        st.info(f"🔄 Se medirá como: {TIPO_LABEL['neutral']}")
 
-                st.divider()
-                sc1, sc2 = st.columns(2)
-                sn_elim = sc1.text_input(
-                    "🔴 SN ONT Retirada / Eliminada (dejar en blanco si no aplica)",
-                    key=f"sne_{fk}",
-                )
-                sn_agr = sc2.text_input(
-                    "🟢 SN ONT Instalada / Agregada (dejar en blanco si no aplica)",
-                    key=f"sna_{fk}",
-                )
+                    st.divider()
+                    sc1, sc2 = st.columns(2)
+                    sn_elim = sc1.text_input(
+                        "🔴 Número de Serie (SN) Retirada (Dejar en blanco si no se retiró equipo)",
+                        key=f"sne_{fk}",
+                    )
+                    sn_agr = sc2.text_input(
+                        "🟢 Número de Serie (SN) Instalada (Dejar en blanco si no se instaló equipo)",
+                        key=f"sna_{fk}",
+                    )
 
-                # ── NUEVO: Estado del equipo instalado ──────────────────
-                st.divider()
-                st.markdown("#### 📦 Estado del Equipo Instalado")
-                estado_equipo = st.radio(
-                    "¿El equipo instalado/colocado es nuevo o recuperado?",
-                    options=ESTADO_EQUIPO_OPS,
-                    index=0,
-                    horizontal=True,
-                    key=f"eq_{fk}",
-                    help=(
-                        "**No Aplica:** No se colocó equipo (p.ej. solo desconexión).\n"
-                        "**Nuevo:** Equipo recién adquirido, sin uso previo.\n"
-                        "**Recuperado:** Equipo previamente usado / retirado de otro cliente."
-                    ),
-                )
-                if estado_equipo == "Recuperado":
-                    st.success("♻️ Equipo **recuperado** — se contará en métricas de recuperación.")
-                elif estado_equipo == "Nuevo":
-                    st.info("🆕 Equipo **nuevo**.")
-                else:
-                    st.caption("➖ No aplica para este tipo de operación.")
+                    # ── Estado del equipo instalado (solo opciones necesarias) ──
+                    st.divider()
+                    st.markdown("#### 📦 Procedencia del Equipo Físico Instalado *")
+                    estado_equipo = st.radio(
+                        "Clasifica el origen del equipo o router que se dejó en casa del cliente:",
+                        options=ESTADO_EQUIPO_OPS, # Ya no tiene "No Aplica"
+                        index=0,
+                        horizontal=True,
+                        key=f"eq_{fk}",
+                        help=(
+                            "**Nuevo:** Equipo recién sacado de inventario en bodega.\n"
+                            "**Recuperado:** Equipo que fue retirado de otro cliente, limpiado y reutilizado."
+                        ),
+                    )
+                    if estado_equipo == "Recuperado":
+                        st.success("♻️ El equipo es **recuperado**. Se contabilizará positivamente en las métricas de ahorro.")
+                    elif estado_equipo == "Nuevo":
+                        st.info("🆕 El equipo es **nuevo** (Gasto de inventario).")
 
-                # Convertir a valor booleano / None
-                if   estado_equipo == "Recuperado": equipo_recuperado = True
-                elif estado_equipo == "Nuevo":       equipo_recuperado = False
-                else:                                equipo_recuperado = None
-                # ────────────────────────────────────────────────────────
+                    # Convertir a booleano
+                    equipo_recuperado = (estado_equipo == "Recuperado")
 
-                st.divider()
-                dc1, dc2, dc3 = st.columns(3)
-                cod_cl   = dc1.text_input("🆔 Código de Cliente *",           key=f"cod_{fk}")
-                nom_cl   = dc2.text_input("👤 Nombre Completo del Cliente *", key=f"nom_{fk}")
-                ord_trab = dc3.text_input("📄 N° de Orden de Trabajo *",      key=f"ot_{fk}")
+                    st.divider()
+                    dc1, dc2, dc3 = st.columns(3)
+                    cod_cl   = dc1.text_input("🆔 Código del Cliente *",            key=f"cod_{fk}")
+                    nom_cl   = dc2.text_input("👤 Nombre Completo del Cliente *", key=f"nom_{fk}")
+                    ord_trab = dc3.text_input("📄 Número de Orden de Trabajo *",      key=f"ot_{fk}")
 
-                desc      = st.text_area("📝 Descripción Adicional (Opcional)", key=f"desc_{fk}", height=80)
-                fecha_reg = st.date_input("📅 Fecha del Movimiento", value=today, key=f"fecha_{fk}")
+                    desc      = st.text_area("📝 Descripción / Observaciones Adicionales (Opcional)", key=f"desc_{fk}", height=80)
+                    fecha_reg = st.date_input("📅 Fecha Exacta del Movimiento *", value=today, key=f"fecha_{fk}")
 
-                st.write("")
-                if st.button("💾 Guardar Registro", type="primary", use_container_width=True):
-                    if not all([tec, zona, motivo, cod_cl.strip(), nom_cl.strip(), ord_trab.strip()]):
-                        _flash("❌ Completa todos los campos obligatorios (*) antes de guardar.", 'error')
-                        st.rerun()
-                    else:
-                        record = {
-                            'Fecha':             fecha_reg.strftime('%Y-%m-%d'),
-                            'Asesor':            st.session_state.username,
-                            'Tecnico':           tec,
-                            'Zona':              zona,
-                            'SN_Eliminada':      sn_elim.strip(),
-                            'SN_Agregada':       sn_agr.strip(),
-                            'Motivo':            motivo,
-                            'Cod_Cliente':       cod_cl.strip(),
-                            'Nombre_Cliente':    nom_cl.strip(),
-                            'Orden_Trabajo':     ord_trab.strip(),
-                            'Descripcion':       desc.strip(),
-                            'Equipo_Recuperado': equipo_recuperado,
-                        }
-                        with st.spinner("Guardando en la base de datos…"):
-                            ok = append_ont_record(record)
-                        if ok:
-                            st.session_state.form_reset += 1
-                            _flash("✅ Registro guardado exitosamente en Neon DB.")
+                    st.write("")
+                    if st.button("💾 Guardar y Procesar Registro", type="primary", use_container_width=True):
+                        # Validación estricta para garantizar que los campos obligatorios se llenen
+                        if not all([tec, zona, motivo, cod_cl.strip(), nom_cl.strip(), ord_trab.strip(), fecha_reg, estado_equipo]):
+                            _flash("❌ Error: Debes completar todos los campos marcados con asterisco (*) antes de guardar el registro.", 'error')
                             st.rerun()
+                        else:
+                            record = {
+                                'Fecha':             fecha_reg.strftime('%Y-%m-%d'),
+                                'Asesor':            st.session_state.username,
+                                'Tecnico':           tec,
+                                'Zona':              zona,
+                                'SN_Eliminada':      sn_elim.strip(),
+                                'SN_Agregada':       sn_agr.strip(),
+                                'Motivo':            motivo,
+                                'Cod_Cliente':       cod_cl.strip(),
+                                'Nombre_Cliente':    nom_cl.strip(),
+                                'Orden_Trabajo':     ord_trab.strip(),
+                                'Descripcion':       desc.strip(),
+                                'Equipo_Recuperado': equipo_recuperado,
+                            }
+                            with st.spinner("Guardando en la base de datos central..."):
+                                ok = append_ont_record(record)
+                            if ok:
+                                st.session_state.form_reset += 1
+                                _flash("✅ Registro operativo guardado exitosamente.")
+                                st.rerun()
+
+        # ── Historial Lateral ──
+        with col_hist:
+            st.markdown("### 🕒 Actividad Reciente de Asesores")
+            st.caption("Mostrando los últimos 10 movimientos registrados en la red.")
+            
+            with st.container(border=True):
+                recent_df = get_recent_records(10)
+                if not recent_df.empty:
+                    # Aplicar algo de formato a la fecha para mejor lectura
+                    recent_df['Fecha'] = pd.to_datetime(recent_df['Fecha']).dt.strftime('%d/%m/%Y')
+                    st.dataframe(
+                        recent_df, 
+                        hide_index=True, 
+                        use_container_width=True,
+                        column_config={
+                            "Fecha": st.column_config.TextColumn("Día"),
+                            "Asesor": st.column_config.TextColumn("Por"),
+                            "Motivo": st.column_config.TextColumn("Acción"),
+                            "Cliente": st.column_config.TextColumn("Cliente"),
+                        }
+                    )
+                else:
+                    st.info("Aún no hay registros recientes para visualizar.")
 
     t_idx += 1
 
 # ═════════════════════════════════════════════════════════════════════
-# TAB 2 — HISTORIAL
+# PESTAÑA 2 — HISTORIAL GENERAL (Tabla completa)
 # ═════════════════════════════════════════════════════════════════════
 if role in ('admin', 'auditor'):
     with tabs[t_idx]:
-        st.markdown("### 🗂️ Historial de Movimientos")
+        st.markdown("### 🗂️ Historial General y Búsqueda de Movimientos")
 
         hc1, hc2 = st.columns([2, 1])
         with hc1:
-            ver_todo = st.toggle("📆 Ver todos los meses del año seleccionado")
+            ver_todo = st.toggle("📆 Visualizar datos de todo el año (Ignorar filtro de mes)")
         with hc2:
-            bq = st.text_input("🔎 Buscar:", placeholder="Técnico, SN, nombre cliente…")
+            bq = st.text_input("🔎 Buscar Registro Específico:", placeholder="Busca por Técnico, SN, Nombre, Código...")
 
         if ver_todo:
-            with st.spinner("Cargando historial anual…"):
+            with st.spinner("Cargando matriz anual completa..."):
                 df_hist = load_year_data(anio)
-            st.caption(f"Mostrando todos los registros de {anio}")
+            st.caption(f"Mostrando todos los registros guardados en el año {anio}")
         else:
             df_hist = load_month_data(anio, m_idx)
-            st.caption(f"Mostrando registros de {mes_sel} {anio}")
+            st.caption(f"Mostrando únicamente registros del mes de {mes_sel} del {anio}")
 
         if bq and not df_hist.empty:
             df_hist = df_hist[
@@ -1005,7 +1050,7 @@ if role in ('admin', 'auditor'):
         if '_mes' in df_hist.columns:
             df_hist = df_hist.drop(columns=['_mes'])
 
-        # Hacer la columna Equipo_Recuperado más legible en historial
+        # Hacer la columna Equipo_Recuperado más legible en el dataframe final
         if 'Equipo_Recuperado' in df_hist.columns:
             df_hist_display = df_hist.copy()
             df_hist_display['Equipo_Recuperado'] = df_hist_display['Equipo_Recuperado'].apply(
@@ -1016,37 +1061,37 @@ if role in ('admin', 'auditor'):
             df_hist_display = df_hist
 
         st.dataframe(df_hist_display, use_container_width=True, hide_index=True)
-        st.caption(f"📊 Total registros mostrados: **{len(df_hist)}**")
+        st.caption(f"📊 Total de registros filtrados mostrados en la tabla: **{len(df_hist)}**")
 
-        # ── Eliminar (solo admin) ──
+        # ── Función exclusiva para el Administrador: Eliminar registro ──
         if role == 'admin' and not df_hist.empty and 'ID' in df_hist.columns:
             st.divider()
-            with st.expander("🗑️ Eliminar un Registro", expanded=False):
+            with st.expander("🗑️ Peligro: Eliminar un Registro del Historial", expanded=False):
                 ids_avail = df_hist['ID'].tolist()
 
                 def _lbl_id(x):
                     r = df_hist[df_hist['ID'] == x]
                     if r.empty:
                         return f"ID {x}"
-                    return (f"ID {x} | {r['Nombre_Cliente'].values[0]} | "
-                            f"{r['Motivo'].values[0]} | {r['Zona'].values[0]}")
+                    return (f"Registro ID: {x} | Cliente: {r['Nombre_Cliente'].values[0]} | "
+                            f"Motivo: {r['Motivo'].values[0]} | Zona: {r['Zona'].values[0]}")
 
-                sel_del = st.selectbox("Selecciona el registro", ids_avail, format_func=_lbl_id)
+                sel_del = st.selectbox("Selecciona el registro que deseas eliminar definitivamente", ids_avail, format_func=_lbl_id)
                 if sel_del is not None:
-                    if st.button("🗑️ Confirmar Eliminación", type="secondary", use_container_width=True):
+                    if st.button("🗑️ Confirmar y Eliminar Registro", type="secondary", use_container_width=True):
                         if soft_delete_record(sel_del):
-                            _flash("🗑️ Registro eliminado del historial.")
+                            _flash("🗑️ Registro marcado como eliminado y removido de las estadísticas.")
                             st.rerun()
                         else:
-                            _flash("❌ No se pudo eliminar el registro.", 'error')
+                            _flash("❌ Error interno del sistema al intentar eliminar el registro.", 'error')
                             st.rerun()
 
         st.divider()
         csv_data = df_hist.to_csv(index=False).encode('utf-8') if not df_hist.empty else b""
         st.download_button(
-            "📥 Descargar CSV",
+            "📥 Exportar Datos Filtrados a formato Excel/CSV",
             csv_data,
-            f"ONT_{mes_sel}_{anio}.csv",
+            f"ONT_Historial_{mes_sel}_{anio}.csv",
             "text/csv",
             use_container_width=True,
             disabled=df_hist.empty,
@@ -1055,84 +1100,85 @@ if role in ('admin', 'auditor'):
     t_idx += 1
 
 # ═════════════════════════════════════════════════════════════════════
-# TAB 3 — CONFIGURACIÓN (admin only)
+# PESTAÑA 3 — CONFIGURACIÓN DEL SISTEMA (Exclusivo Administrador)
 # ═════════════════════════════════════════════════════════════════════
 if role == 'admin' and len(tabs) > t_idx:
     with tabs[t_idx]:
-        st.markdown("### ⚙️ Configuración del Sistema")
-        st.caption("Los cambios en catálogos se reflejan inmediatamente en la base de datos.")
+        st.markdown("### ⚙️ Centro de Configuración y Control de Accesos")
+        st.caption("Atención: Los cambios en catálogos se guardan y reflejan inmediatamente en la base de datos principal para todos los usuarios.")
 
         t_z, t_tec, t_mot, t_usr = st.tabs(
-            ["🗺️ Zonas", "🔧 Técnicos", "📋 Motivos", "👤 Usuarios"])
+            ["🗺️ Catálogo de Zonas", "🔧 Personal Técnico", "📋 Tipos de Operación", "👤 Control de Usuarios"])
 
-        # ── Zonas ──
+        # ── Configurador de Zonas Geográficas ──
         with t_z:
-            st.markdown("#### Gestión de Zonas / Nodos")
+            st.markdown("#### Gestión de Zonas / Nodos de Cobertura")
             for z in get_zonas():
                 cz1, cz2 = st.columns([5, 1])
                 cz1.text(f"🗺️  {z}")
-                if cz2.button("🗑️", key=f"dz_{z}", help="Eliminar zona"):
+                if cz2.button("🗑️", key=f"dz_{z}", help="Eliminar esta zona del sistema"):
                     try:
                         with conn.session as s:
                             s.execute(text("DELETE FROM zonas WHERE nombre = :z"), {"z": z})
                             s.commit()
                         st.cache_data.clear()
-                        _flash("🗑️ Zona eliminada.")
+                        _flash("🗑️ Zona eliminada exitosamente.")
                         st.rerun()
                     except Exception as e:
-                        _flash(f"❌ Error: {e}", 'error')
+                        _flash(f"❌ Error al eliminar zona: {e}", 'error')
                         st.rerun()
             st.divider()
             with st.form("add_zona", clear_on_submit=True):
-                st.markdown("**➕ Agregar Nueva Zona**")
-                nz = st.text_input("Nombre del nodo / zona")
-                if st.form_submit_button("Agregar Zona") and nz.strip():
+                st.markdown("**➕ Agregar Nueva Zona Geográfica**")
+                nz = st.text_input("Ingresa el nombre de la nueva zona o nodo")
+                if st.form_submit_button("Guardar Zona") and nz.strip():
                     try:
                         with conn.session as s:
                             s.execute(text("INSERT INTO zonas (nombre) VALUES (:z)"), {"z": nz.strip()})
                             s.commit()
                         st.cache_data.clear()
-                        _flash("✅ Zona agregada.")
+                        _flash("✅ Nueva zona agregada al catálogo.")
                         st.rerun()
                     except Exception as e:
-                        _flash("❌ La zona ya existe o hubo un error.", "error")
+                        _flash("❌ La zona ya existe en la base de datos o se produjo un error de conexión.", "error")
 
-        # ── Técnicos ──
+        # ── Configurador de Técnicos ──
         with t_tec:
-            st.markdown("#### Gestión de Técnicos de Campo")
+            st.markdown("#### Gestión de Personal Técnico de Campo")
             for tec in get_tecnicos():
                 ct1, ct2 = st.columns([5, 1])
                 ct1.text(f"🔧  {tec}")
-                if ct2.button("🗑️", key=f"dt_{tec}", help="Eliminar técnico"):
+                if ct2.button("🗑️", key=f"dt_{tec}", help="Desvincular a este técnico"):
                     try:
                         with conn.session as s:
                             s.execute(text("DELETE FROM tecnicos WHERE nombre = :t"), {"t": tec})
                             s.commit()
                         st.cache_data.clear()
-                        _flash("🗑️ Técnico eliminado.")
+                        _flash("🗑️ Técnico removido de la base de datos.")
                         st.rerun()
                     except Exception as e:
-                        _flash(f"❌ Error: {e}", 'error')
+                        _flash(f"❌ Error al eliminar técnico: {e}", 'error')
                         st.rerun()
             st.divider()
             with st.form("add_tec", clear_on_submit=True):
-                st.markdown("**➕ Agregar Nuevo Técnico**")
-                nt = st.text_input("Nombre completo del técnico")
-                if st.form_submit_button("Agregar Técnico") and nt.strip():
+                st.markdown("**➕ Agregar Nuevo Técnico de Cuadrilla**")
+                nt = st.text_input("Ingresa el nombre completo del técnico")
+                if st.form_submit_button("Guardar Técnico") and nt.strip():
                     try:
                         with conn.session as s:
                             s.execute(text("INSERT INTO tecnicos (nombre) VALUES (:t)"), {"t": nt.strip()})
                             s.commit()
                         st.cache_data.clear()
-                        _flash("✅ Técnico agregado.")
+                        _flash("✅ Nuevo técnico agregado a la plantilla de opciones.")
                         st.rerun()
                     except Exception:
-                        _flash("❌ El técnico ya existe o hubo un error.", "error")
+                        _flash("❌ El técnico ya está registrado o se produjo un error.", "error")
 
-        # ── Motivos ──
+        # ── Configurador de Motivos / Tipos de Operación ──
         with t_mot:
-            st.markdown("#### Gestión de Motivos de Operación")
-            st.info("🎨 **Verde** = Positivo  |  **Rojo** = Negativo  |  **Naranja** = Neutral")
+            st.markdown("#### Configuración de Impacto por Motivo de Operación")
+            st.info("🎨 **Verde** = Afecta Positivamente | **Rojo** = Afecta Negativamente | **Naranja** = Operación Neutral")
+            st.caption("Nota: 'Cambio de Tecnología' y 'Cambio por Renovación' siempre son clasificados como Positivos internamente.")
             df_mots = get_motivos_df()
             for _, mr in df_mots.iterrows():
                 cm1, cm2, cm3 = st.columns([4, 2, 1])
@@ -1143,27 +1189,27 @@ if role == 'admin' and len(tabs) > t_idx:
                     f"{TIPO_EMOJI.get(tipo_m, '⚪')} {tipo_m.capitalize()}</span>",
                     unsafe_allow_html=True,
                 )
-                if cm3.button("🗑️", key=f"dm_{mr.get('Motivo', '')}"):
+                if cm3.button("🗑️", key=f"dm_{mr.get('Motivo', '')}", help="Eliminar este motivo"):
                     try:
                         with conn.session as s:
                             s.execute(text("DELETE FROM motivos WHERE motivo = :m"), {"m": mr.get('Motivo')})
                             s.commit()
                         st.cache_data.clear()
-                        _flash("🗑️ Motivo eliminado.")
+                        _flash("🗑️ Motivo operativo eliminado.")
                         st.rerun()
                     except Exception as e:
-                        _flash(f"❌ Error: {e}", 'error')
+                        _flash(f"❌ Error al intentar eliminar el motivo: {e}", 'error')
                         st.rerun()
             st.divider()
             with st.form("add_mot", clear_on_submit=True):
-                st.markdown("**➕ Agregar Nuevo Motivo**")
-                nm  = st.text_input("Descripción del motivo")
+                st.markdown("**➕ Clasificar Nuevo Motivo Técnico**")
+                nm  = st.text_input("Describe claramente el nuevo motivo de la operación")
                 ntm = st.selectbox(
-                    "Tipo de impacto",
+                    "Define en qué estadística se sumará este evento",
                     ['positive', 'negative', 'neutral'],
                     format_func=lambda x: TIPO_LABEL[x],
                 )
-                if st.form_submit_button("Agregar Motivo") and nm.strip():
+                if st.form_submit_button("Guardar Clasificación") and nm.strip():
                     try:
                         with conn.session as s:
                             s.execute(
@@ -1172,35 +1218,35 @@ if role == 'admin' and len(tabs) > t_idx:
                             )
                             s.commit()
                         st.cache_data.clear()
-                        _flash("✅ Motivo agregado.")
+                        _flash("✅ El nuevo motivo ha sido catalogado exitosamente.")
                         st.rerun()
                     except Exception:
-                        _flash("❌ El motivo ya existe o hubo un error.", "error")
+                        _flash("❌ El motivo ya existe en el sistema o hubo un error de conexión.", "error")
 
-        # ── Usuarios ──
+        # ── Panel de Control de Usuarios ──
         with t_usr:
-            st.markdown("#### Control de Accesos y Usuarios")
-            st.info("🔒 **Política:** 8+ caracteres · Mayúscula · Minúscula · Número · Carácter especial")
+            st.markdown("#### Gestor de Credenciales y Control de Accesos")
+            st.info("🔒 **Reglas de Seguridad Obligatorias para Contraseñas:** 8+ caracteres · Letra Mayúscula · Letra Minúscula · Número · Carácter especial (!, @, #, $, etc.)")
 
             u_col1, u_col2 = st.columns([1, 2])
 
             with u_col1:
                 with st.form("add_usr", clear_on_submit=True):
-                    st.markdown("**Crear Nuevo Usuario**")
-                    nu_u = st.text_input("Nombre de usuario")
-                    nu_p = st.text_input("Contraseña", type="password")
+                    st.markdown("**Creación de Nueva Cuenta**")
+                    nu_u = st.text_input("Asigna el nombre de usuario único")
+                    nu_p = st.text_input("Asigna la contraseña inicial", type="password")
                     nu_r = st.selectbox(
-                        "Rol",
+                        "Selecciona el Nivel de Permisos (Rol)",
                         ['auditor', 'admin'],
                         format_func=lambda x: {
-                            'auditor': '📝 Auditor (Puede registrar y ver)',
-                            'admin':   '⚙️ Administrador (Acceso total)',
+                            'auditor': '📝 Auditor (Limitado a registrar e historial)',
+                            'admin':   '⚙️ Administrador (Acceso total y configuración)',
                         }[x],
                     )
-                    if st.form_submit_button("✅ Crear Usuario") and nu_u and nu_p:
+                    if st.form_submit_button("✅ Crear Nuevo Usuario") and nu_u and nu_p:
                         err_p = _validate_pw(nu_p)
                         if err_p:
-                            st.error(err_p)
+                            st.error(f"La contraseña es muy débil: {err_p}")
                         else:
                             try:
                                 with conn.session as s:
@@ -1210,19 +1256,19 @@ if role == 'admin' and len(tabs) > t_idx:
                                         {"u": nu_u, "p": _hash(nu_p), "r": nu_r},
                                     )
                                     s.commit()
-                                _flash("✅ Usuario creado.")
+                                _flash("✅ Cuenta de usuario generada exitosamente.")
                                 st.rerun()
                             except Exception:
-                                st.error("❌ Ese nombre de usuario ya existe o hubo un error.")
+                                st.error("❌ Conflicto: Ese nombre de usuario ya está tomado por otra persona.")
 
                 with st.form("reset_pw_form", clear_on_submit=True):
-                    st.markdown("**Restablecer Contraseña**")
-                    rpu = st.text_input("Usuario exacto")
-                    rpp = st.text_input("Nueva Contraseña", type="password")
-                    if st.form_submit_button("🔑 Restablecer") and rpu and rpp:
+                    st.markdown("**🔑 Forzar Restablecimiento de Contraseña**")
+                    rpu = st.text_input("Ingresa el usuario exacto al que le cambiarás la clave")
+                    rpp = st.text_input("Ingresa la Nueva Contraseña Segura", type="password")
+                    if st.form_submit_button("Restablecer Contraseña Ahora") and rpu and rpp:
                         err_p = _validate_pw(rpp)
                         if err_p:
-                            st.error(err_p)
+                            st.error(f"La contraseña es muy débil: {err_p}")
                         else:
                             ok = _update_user_fields(rpu, {
                                 'password_hash':   _hash(rpp),
@@ -1230,7 +1276,7 @@ if role == 'admin' and len(tabs) > t_idx:
                                 'locked_until':    None,
                             })
                             if ok:
-                                _flash("✅ Contraseña actualizada.")
+                                _flash("✅ Contraseña actualizada correctamente, los intentos fallidos han sido reseteados.")
                                 st.rerun()
 
             with u_col2:
@@ -1242,43 +1288,43 @@ if role == 'admin' and len(tabs) > t_idx:
                     df_ot = df_u_all[df_u_all['username'] != SUPERADMIN].reset_index(drop=True)
 
                     if not df_sa.empty:
-                        st.markdown("🛡️ **Super Administrador (no editable)**")
+                        st.markdown("🛡️ **Usuario Maestro o Super Administrador (Protegido)**")
                         st.dataframe(
                             df_sa[['username', 'role']].rename(
-                                columns={'username': 'Usuario', 'role': 'Rol'}),
+                                columns={'username': 'Credencial Maestra', 'role': 'Nivel de Acceso'}),
                             hide_index=True, use_container_width=True,
                         )
                         st.divider()
 
                     if not df_ot.empty:
-                        st.markdown("**Usuarios Registrados:**")
+                        st.markdown("**Lista de Usuarios Activos en el Sistema:**")
                         for _, ur in df_ot.iterrows():
                             uc1, uc2, uc3, uc4, uc5 = st.columns([2, 1, 1, 1, 1])
                             uc1.markdown(f"**{ur['username']}**")
-                            uc2.caption(ur.get('role', 'auditor'))
+                            uc2.caption(ur.get('role', 'auditor').capitalize())
                             is_banned_u = bool(ur.get('is_banned', False))
                             fa_u        = int(ur.get('failed_attempts', 0) or 0)
-                            uc3.caption(f"{'🚫 Baneado' if is_banned_u else '✅ Activo'}")
-                            uc4.caption(f"{fa_u} int. fallidos")
+                            uc3.caption(f"{'🚫 Suspendido' if is_banned_u else '✅ Operativo'}")
+                            uc4.caption(f"{fa_u} fallos login")
 
                             with uc5:
                                 if is_banned_u:
-                                    if st.button("♻️", key=f"unban_{ur['username']}", help="Desbanear"):
+                                    if st.button("♻️", key=f"unban_{ur['username']}", help="Levantar suspensión"):
                                         _update_user_fields(ur['username'], {'is_banned': False, 'failed_attempts': 0})
-                                        _flash(f"✅ Usuario {ur['username']} desbaneado.")
+                                        _flash(f"✅ Los privilegios del usuario {ur['username']} han sido restaurados.")
                                         st.rerun()
                                 else:
-                                    if st.button("🚫", key=f"ban_{ur['username']}", help="Banear"):
+                                    if st.button("🚫", key=f"ban_{ur['username']}", help="Suspender acceso"):
                                         _update_user_fields(ur['username'], {'is_banned': True})
-                                        _flash(f"🚫 Usuario {ur['username']} baneado.")
+                                        _flash(f"🚫 Usuario {ur['username']} inhabilitado de acceder al sistema.")
                                         st.rerun()
 
                             col_del = st.columns(1)[0]
-                            if col_del.button(f"🗑️ Eliminar {ur['username']}",
+                            if col_del.button(f"🗑️ Eliminar permanentemente la cuenta de {ur['username']}",
                                               key=f"del_u_{ur['username']}",
                                               use_container_width=True):
                                 if ur['username'] == st.session_state.username:
-                                    _flash("❌ No puedes eliminar tu propia cuenta.", 'error')
+                                    _flash("❌ Por razones de seguridad, no puedes eliminar la cuenta que estás usando actualmente.", 'error')
                                     st.rerun()
                                 else:
                                     try:
@@ -1288,10 +1334,10 @@ if role == 'admin' and len(tabs) > t_idx:
                                                 {"u": ur['username']},
                                             )
                                             s.commit()
-                                        _flash(f"🗑️ Usuario {ur['username']} eliminado.")
+                                        _flash(f"🗑️ El usuario {ur['username']} ha sido erradicado del sistema.")
                                         st.rerun()
                                     except Exception as e:
-                                        _flash(f"❌ Error al eliminar: {e}", "error")
+                                        _flash(f"❌ Error al intentar eliminar cuenta: {e}", "error")
                             st.divider()
                 else:
-                    st.info("No hay usuarios registrados aún.")
+                    st.info("No hay usuarios adicionales registrados en el sistema.")
